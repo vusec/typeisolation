@@ -1,0 +1,123 @@
+diff --git a/infra/targets/webservers.py b/infra/targets/webservers.py
+index f031178..263b3bf 100644
+--- a/infra/targets/webservers.py
++++ b/infra/targets/webservers.py
+@@ -361,12 +361,14 @@ class WebServerRunner:
+             correctly and perfom warmup run."""
+ 
+             server_cmd = self.server.start_cmd(self, foreground=True)
+-            server.run(server_cmd, wait=False)
++            renv = self.ctx.runenv.join_paths()
++            renv['LD_PRELOAD'] = '/tmp/preloadssl.so'
++            server.run(server_cmd, env=renv, wait=False)
+ 
+             # Wait for server to come up
+             starttime = time.time()
+             while time.time() - starttime < 5:
+-                test_cmd = 'curl -s {url}'.format(url=url)
++                test_cmd = 'curl -k -s {url}'.format(url=url)
+                 ret = client.run(test_cmd, allow_error=True)
+                 if ret['rv'] == 0:
+                     break
+@@ -470,7 +472,7 @@ class WebServerRunner:
+         if not self.ctx.args.remote_server_host:
+             server_tunnel_dest = rrunner_port_server
+ 
+-        url = 'http://{a.server_ip}:{a.port}/index.html'.format(a=self.ctx.args)
++        url = 'https://{a.server_ip}:{a.port}/index.html'.format(a=self.ctx.args)
+         wrk_path = Wrk().get_binary_path(self.ctx)
+         wrk_threads = self.ctx.args.threads
+         wrk_duration = self.ctx.args.duration
+@@ -711,11 +713,20 @@ class WebServerRunner:
+             filesize = parse_filesize(self.ctx.args.filesize)
+             f.write(''.join(random.choice(chars) for i in range(filesize)))
+ 
++        # alyssa
++        shutil.copy('/tmp/nginx.crt', self.stagedir)
++        shutil.copy('/tmp/nginx.key', self.stagedir)
++
+         self.server.populate_stagedir(self)
+ 
+     def request_and_check_index(self):
+         assert not self.pool
+-        url = 'http://localhost:%d/index.html' % self.ctx.args.port
++
++        # alyssa hax
++        import ssl
++        ssl._create_default_https_context = ssl._create_unverified_context
++
++        url = 'https://localhost:%d/index.html' % self.ctx.args.port
+         self.ctx.log.info('requesting ' + url)
+         urlretrieve(url, 'requested_index.html')
+ 
+@@ -741,6 +752,7 @@ class WebServerRunner:
+         cp -r {self.stagedir} {self.rundir}
+ 
+         echo "=== starting web server"
++        export LD_PRELOAD=/tmp/preloadssl.so
+         {start_script}
+         server_host="$({host_command})"
+         echo "=== serving at $server_host:{port}"
+@@ -767,6 +779,7 @@ class WebServerRunner:
+         return ('''
+         comm_recv() {{ netcat --close -l -p {self.comm_port} || true; }}
+ 
++        export LD_PRELOAD=/tmp/preloadssl.so
+         {start_script}
+ 
+         echo "=== writing hostname to file"
+@@ -807,9 +820,9 @@ class WebServerRunner:
+ 
+     def test_client_script(self):
+         return self.client_script('''
+-        url="http://$server_host:{port}/index.html"
++        url="https://$server_host:{port}/index.html"
+         echo "=== requesting $url"
+-        wget -q -O requested_index.html "$url"
++        wget --no-check-certificate -q -O requested_index.html "$url"
+         ''') + \
+         '''
+         if diff -q index.html requested_index.html; then
+@@ -843,7 +856,7 @@ class WebServerRunner:
+     def wrk_client_script(self):
+         conns = ' '.join(str(c) for c in self.ctx.args.connections)
+         return self.client_script('''
+-        url="http://$server_host:{port}/index.html"
++        url="https://$server_host:{port}/index.html"
+         echo "=== will benchmark $url for {duration} seconds for each work rate"
+ 
+         echo "=== 3 second warmup run"
+@@ -963,6 +976,8 @@ class Nginx(WebServer):
+                 help='number of worker processes (default 1)')
+         parser.add_argument('--worker-connections', type=int, default=1024,
+                 help='number of connections per worker process (default 1024)')
++        parser.add_argument('--use-ssl',
++                default=False, action='store_true')
+ 
+     def populate_stagedir(self, runner):
+         # Nginx needs the logs/ dir to create the default error log before
+@@ -983,7 +998,8 @@ class Nginx(WebServer):
+         }}
+         http {{
+             server {{
+-                listen {a.port};
++                listen {a.port} {sslopt};
++                {sslopts}
+                 server_name localhost;
+                 sendfile on;
+                 access_log off;
+@@ -995,6 +1011,14 @@ class Nginx(WebServer):
+             }}
+         }}
+         '''
++        sslopt = ""
++        sslopts = ""
++        if a.use_ssl:
++            sslopt = "ssl"
++            sslopts = '''
++            ssl_certificate nginx.crt;
++            ssl_certificate_key nginx.key;
++            '''
+         with open('nginx.conf', 'w') as f:
+             f.write(config_template.format(**locals()))
+ 

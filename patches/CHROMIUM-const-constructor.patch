@@ -1,0 +1,15 @@
+--- chromium.old/src/chrome/common/extensions/chrome_extensions_client.h	2016-07-04 14:55:53.107915662 +0200
++++ chromium/src/chrome/common/extensions/chrome_extensions_client.h	2016-07-04 10:49:25.186894940 +0200
+@@ -58,9 +58,9 @@
+   static ChromeExtensionsClient* GetInstance();
+ 
+  private:
+-  const ChromeAPIPermissions chrome_api_permissions_;
+-  const ExtensionsAPIPermissions extensions_api_permissions_;
+-  const ChromePermissionMessageProvider permission_message_provider_;
++  /*const*/ ChromeAPIPermissions chrome_api_permissions_;
++  /*const*/ ExtensionsAPIPermissions extensions_api_permissions_;
++  /*const*/ ChromePermissionMessageProvider permission_message_provider_;
+ 
+   // A whitelist of extensions that can script anywhere. Do not add to this
+   // list (except in tests) without consulting the Extensions team first.

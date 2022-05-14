@@ -1,0 +1,7 @@
+STAT(count_alloca)
+STAT(count_alloca_array)
+STAT(count_alloca_dynamic)
+STAT(count_alloca_zeroed)
+STAT(count_bb)
+STAT(count_func)
+STAT(count_ins)

@@ -1,0 +1,17 @@
+diff --git a/src/static_vars.cc b/src/static_vars.cc
+index 79de97e..dfa087d 100644
+--- a/src/static_vars.cc
++++ b/src/static_vars.cc
+@@ -113,10 +113,12 @@ void Static::InitStaticVars() {
+ static inline
+ void SetupAtForkLocksHandler()
+ {
++#if 0
+   perftools_pthread_atfork(
+     CentralCacheLockAll,    // parent calls before fork
+     CentralCacheUnlockAll,  // parent calls after fork
+     CentralCacheUnlockAll); // child calls after fork
++#endif
+ }
+ REGISTER_MODULE_INITIALIZER(tcmalloc_fork_handler, SetupAtForkLocksHandler());
+ 

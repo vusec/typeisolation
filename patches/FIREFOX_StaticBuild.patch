@@ -1,0 +1,86 @@
+diff -ur firefox-47.0.orig/build/gecko_templates.mozbuild firefox-47.0/build/gecko_templates.mozbuild
+--- firefox-47.0.orig/build/gecko_templates.mozbuild	2016-05-12 19:13:12.000000000 +0200
++++ firefox-47.0/build/gecko_templates.mozbuild	2017-06-09 21:28:27.790875183 +0200
+@@ -144,6 +144,19 @@
+ 
+     GeckoBinary(**kwargs)
+ 
++@template
++def GeckoStaticLibrary(name, **kwargs):
++    '''Template for shared libraries related to Gecko.
++
++    `name` identifies the library base name.
++    See the documentation for `GeckoBinary` for other possible arguments.
++    '''
++    StaticLibrary(name)
++
++    kwargs.setdefault('mozglue', 'library')
++
++    GeckoBinary(**kwargs)
++
+ 
+ @template
+ def GeckoFramework(name, **kwargs):
+Only in firefox-47.0/build: mach_bootstrap.pyc
+diff -ur firefox-47.0.orig/build/templates.mozbuild firefox-47.0/build/templates.mozbuild
+--- firefox-47.0.orig/build/templates.mozbuild	2016-06-01 06:11:40.000000000 +0200
++++ firefox-47.0/build/templates.mozbuild	2017-06-09 21:33:25.755778850 +0200
+@@ -64,6 +64,16 @@
+ 
+ 
+ @template
++def StaticLibrary(name):
++    '''Template for shared libraries.'''
++    Library(name)
++
++    FORCE_SHARED_LIB = False
++
++    Binary()
++
++
++@template
+ def SharedLibrary(name):
+     '''Template for shared libraries.'''
+     Library(name)
+diff -ur firefox-47.0.orig/toolkit/library/Makefile.in firefox-47.0/toolkit/library/Makefile.in
+--- firefox-47.0.orig/toolkit/library/Makefile.in	2016-05-12 19:13:30.000000000 +0200
++++ firefox-47.0/toolkit/library/Makefile.in	2017-06-10 16:52:55.012423458 +0200
+@@ -14,11 +14,11 @@
+ include $(topsrcdir)/config/rules.mk
+ 
+ ifdef COMPILE_ENVIRONMENT
+-target:: $(FINAL_TARGET)/dependentlibs.list
++#target:: $(FINAL_TARGET)/dependentlibs.list
+ endif
+ 
+-$(FINAL_TARGET)/dependentlibs.list: $(topsrcdir)/toolkit/library/dependentlibs.py $(SHARED_LIBRARY) $(wildcard $(if $(wildcard $(FINAL_TARGET)/dependentlibs.list),$(addprefix $(FINAL_TARGET)/,$(shell cat $(FINAL_TARGET)/dependentlibs.list))))
+-	$(PYTHON) $< $(SHARED_LIBRARY) -L $(FINAL_TARGET) $(if $(TOOLCHAIN_PREFIX),$(addprefix -p ,$(TOOLCHAIN_PREFIX))) > $@
++$(FINAL_TARGET)/dependentlibs.list: $(topsrcdir)/toolkit/library/dependentlibs.py $(STATIC_LIBRARY) $(wildcard $(if $(wildcard $(FINAL_TARGET)/dependentlibs.list),$(addprefix $(FINAL_TARGET)/,$(shell cat $(FINAL_TARGET)/dependentlibs.list))))
++	$(PYTHON) $< $(LIBRARY) -L $(FINAL_TARGET) $(if $(TOOLCHAIN_PREFIX),$(addprefix -p ,$(TOOLCHAIN_PREFIX))) > $@
+ 
+ .PHONY: gtestxul
+ gtestxul:
+diff -ur firefox-47.0.orig/toolkit/library/moz.build firefox-47.0/toolkit/library/moz.build
+--- firefox-47.0.orig/toolkit/library/moz.build	2016-06-01 06:11:43.000000000 +0200
++++ firefox-47.0/toolkit/library/moz.build	2017-06-09 21:36:03.333960968 +0200
+@@ -10,10 +10,8 @@
+         # This is going to be a framework named "XUL", not an ordinary library named
+         # "libxul.dylib"
+         GeckoFramework(name, linkage=None)
+-        SHARED_LIBRARY_NAME = 'XUL'
+     else:
+-        GeckoSharedLibrary(name, linkage=None)
+-        SHARED_LIBRARY_NAME = 'xul'
++        GeckoStaticLibrary(name, linkage=None)
+ 
+     DELAYLOAD_DLLS += [
+         'comdlg32.dll',
+@@ -64,7 +62,7 @@
+ 
+ FORCE_STATIC_LIB = True
+ 
+-STATIC_LIBRARY_NAME = 'xul_s'
++STATIC_LIBRARY_NAME = 'xul'
+ 
+ SOURCES += [
+     'StaticXULComponentsStart.cpp',

@@ -1,0 +1,47 @@
+diff -ru typesafestack-typedmalloc-inline-typeisolation/src/exit/exit.c baseline-lto/src/exit/exit.c
+--- typesafestack-typedmalloc-inline-typeisolation/src/exit/exit.c	2021-02-27 18:50:45.052033531 +0100
++++ baseline-lto/src/exit/exit.c	2021-01-15 03:26:00.000000000 +0100
+@@ -8,9 +8,8 @@
+ 
+ /* atexit.c and __stdio_exit.c override these. the latter is linked
+  * as a consequence of linking either __toread.c or __towrite.c. */
+-// ALYSSA: we want the real impls of these
+-//weak_alias(dummy, __funcs_on_exit);
+-//weak_alias(dummy, __stdio_exit);
++weak_alias(dummy, __funcs_on_exit);
++weak_alias(dummy, __stdio_exit);
+ weak_alias(dummy, _fini);
+ 
+ extern weak hidden void (*const __fini_array_start)(void), (*const __fini_array_end)(void);
+Only in baseline-lto/src: malloc
+diff -ru typesafestack-typedmalloc-inline-typeisolation/src/stdio/fflush.c baseline-lto/src/stdio/fflush.c
+--- typesafestack-typedmalloc-inline-typeisolation/src/stdio/fflush.c	2021-02-27 19:00:49.384623025 +0100
++++ baseline-lto/src/stdio/fflush.c	2021-01-15 03:26:00.000000000 +0100
+@@ -2,9 +2,8 @@
+ 
+ /* stdout.c will override this if linked */
+ static FILE *volatile dummy = 0;
+-// ALYSSA: we want the real impls of these
+-//weak_alias(dummy, __stdout_used);
+-//weak_alias(dummy, __stderr_used);
++weak_alias(dummy, __stdout_used);
++weak_alias(dummy, __stderr_used);
+ 
+ int fflush(FILE *f)
+ {
+diff -ru typesafestack-typedmalloc-inline-typeisolation/src/stdio/__stdio_exit.c baseline-lto/src/stdio/__stdio_exit.c
+--- typesafestack-typedmalloc-inline-typeisolation/src/stdio/__stdio_exit.c	2021-02-27 18:53:56.815662804 +0100
++++ baseline-lto/src/stdio/__stdio_exit.c	2021-01-15 03:26:00.000000000 +0100
+@@ -1,10 +1,9 @@
+ #include "stdio_impl.h"
+ 
+ static FILE *volatile dummy_file = 0;
+-// ALYSSA: we want the real impls of these
+-/*weak_alias(dummy_file, __stdin_used);
++weak_alias(dummy_file, __stdin_used);
+ weak_alias(dummy_file, __stdout_used);
+-weak_alias(dummy_file, __stderr_used);*/
++weak_alias(dummy_file, __stderr_used);
+ 
+ static void close_file(FILE *f)
+ {

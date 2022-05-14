@@ -1,0 +1,14 @@
+--- benchspec/CPU/502.gcc_r/src/include/obstack.h.old	2020-10-21 01:43:14.874403727 +0200
++++ benchspec/CPU/502.gcc_r/src/include/obstack.h	2020-10-21 01:45:53.101351984 +0200
+@@ -292,7 +292,10 @@
+ 
+ #define obstack_memory_used(h) _obstack_memory_used (h)
+ 
+-#if !defined(SPEC) && defined __GNUC__ && defined __STDC__ && __STDC__
++/* this introduces undefined behavior, so we remove the !defined(SPEC) */
++/* (note that this is new in CPU2017, CPU2006 left this alone...) */
++//#if !defined(SPEC) && defined __GNUC__ && defined __STDC__ && __STDC__
++#if defined __GNUC__ && defined __STDC__ && __STDC__
+ /* NextStep 2.0 cc is really gcc 1.93 but it defines __GNUC__ = 2 and
+    does not implement __extension__.  But that compiler doesn't define
+    __GNUC_MINOR__.  */

@@ -1,0 +1,77 @@
+diff -ru a/src/thread/pthread_cleanup_push.c b/src/thread/pthread_cleanup_push.c
+--- a/src/thread/pthread_cleanup_push.c	2021-04-15 13:21:33.863523702 +0000
++++ b/src/thread/pthread_cleanup_push.c	2021-01-15 02:26:00.000000000 +0000
+@@ -3,8 +3,8 @@
+ static void dummy(struct __ptcb *cb)
+ {
+ }
+-//weak_alias(dummy, __do_cleanup_push);
+-//weak_alias(dummy, __do_cleanup_pop);
++weak_alias(dummy, __do_cleanup_push);
++weak_alias(dummy, __do_cleanup_pop);
+ 
+ void _pthread_cleanup_push(struct __ptcb *cb, void (*f)(void *), void *x)
+ {
+diff -ru a/src/thread/pthread_create.c b/src/thread/pthread_create.c
+--- a/src/thread/pthread_create.c	2021-04-15 13:31:18.981163397 +0000
++++ b/src/thread/pthread_create.c	2021-01-15 02:26:00.000000000 +0000
+@@ -10,12 +10,12 @@
+ static void dummy_0()
+ {
+ }
+-/*weak_alias(dummy_0, __acquire_ptc);
++weak_alias(dummy_0, __acquire_ptc);
+ weak_alias(dummy_0, __release_ptc);
+ weak_alias(dummy_0, __pthread_tsd_run_dtors);
+ weak_alias(dummy_0, __do_orphaned_stdio_locks);
+ weak_alias(dummy_0, __dl_thread_cleanup);
+-weak_alias(dummy_0, __membarrier_init);*/
++weak_alias(dummy_0, __membarrier_init);
+ 
+ static int tl_lock_count;
+ static int tl_lock_waiters;
+@@ -216,14 +216,14 @@
+ 
+ /* pthread_key_create.c overrides this */
+ static volatile size_t dummy = 0;
+-//weak_alias(dummy, __pthread_tsd_size);
++weak_alias(dummy, __pthread_tsd_size);
+ static void *dummy_tsd[1] = { 0 };
+-//weak_alias(dummy_tsd, __pthread_tsd_main);
++weak_alias(dummy_tsd, __pthread_tsd_main);
+ 
+ static FILE *volatile dummy_file = 0;
+-/*weak_alias(dummy_file, __stdin_used);
++weak_alias(dummy_file, __stdin_used);
+ weak_alias(dummy_file, __stdout_used);
+-weak_alias(dummy_file, __stderr_used);*/
++weak_alias(dummy_file, __stderr_used);
+ 
+ static void init_file_lock(FILE *f)
+ {
+diff -ru a/src/thread/pthread_join.c b/src/thread/pthread_join.c
+--- a/src/thread/pthread_join.c	2021-04-15 12:59:28.420723800 +0000
++++ b/src/thread/pthread_join.c	2021-01-15 02:26:00.000000000 +0000
+@@ -5,7 +5,7 @@
+ static void dummy1(pthread_t t)
+ {
+ }
+-//weak_alias(dummy1, __tl_sync);
++weak_alias(dummy1, __tl_sync);
+ 
+ static int __pthread_timedjoin_np(pthread_t t, void **res, const struct timespec *at)
+ {
+diff -ru a/src/thread/pthread_key_create.c b/src/thread/pthread_key_create.c
+--- a/src/thread/pthread_key_create.c	2021-04-15 12:47:54.437968660 +0000
++++ b/src/thread/pthread_key_create.c	2021-01-15 02:26:00.000000000 +0000
+@@ -17,8 +17,8 @@
+ {
+ }
+ 
+-/*weak_alias(dummy_0, __tl_lock);
+-weak_alias(dummy_0, __tl_unlock);*/
++weak_alias(dummy_0, __tl_lock);
++weak_alias(dummy_0, __tl_unlock);
+ 
+ int __pthread_key_create(pthread_key_t *k, void (*dtor)(void *))
+ {

@@ -1,0 +1,49 @@
+diff --git a/include/locale b/include/locale
+index 3fe4430..dd5d8ca 100644
+--- a/include/locale
++++ b/include/locale
+@@ -1452,7 +1452,7 @@ num_put<_CharT, _OutputIterator>::do_put(iter_type __s, ios_base& __iob,
+                           + ((__iob.flags() & ios_base::showbase) != 0)
+                           + 2;
+     char __nar[__nbuf];
+-    int __nc = __libcpp_snprintf_l(__nar, sizeof(__nar), _LIBCPP_GET_C_LOCALE, __fmt, __v);
++    int __nc = __libcpp_snprintf_l(__nar, __nbuf, _LIBCPP_GET_C_LOCALE, __fmt, __v);
+     char* __ne = __nar + __nc;
+     char* __np = this->__identify_padding(__nar, __ne, __iob);
+     // Stage 2 - Widen __nar while adding thousands separators
+@@ -1479,7 +1479,7 @@ num_put<_CharT, _OutputIterator>::do_put(iter_type __s, ios_base& __iob,
+                           + ((__iob.flags() & ios_base::showbase) != 0)
+                           + 2;
+     char __nar[__nbuf];
+-    int __nc = __libcpp_snprintf_l(__nar, sizeof(__nar), _LIBCPP_GET_C_LOCALE, __fmt, __v);
++    int __nc = __libcpp_snprintf_l(__nar, __nbuf, _LIBCPP_GET_C_LOCALE, __fmt, __v);
+     char* __ne = __nar + __nc;
+     char* __np = this->__identify_padding(__nar, __ne, __iob);
+     // Stage 2 - Widen __nar while adding thousands separators
+@@ -1506,7 +1506,7 @@ num_put<_CharT, _OutputIterator>::do_put(iter_type __s, ios_base& __iob,
+                           + ((__iob.flags() & ios_base::showbase) != 0)
+                           + 1;
+     char __nar[__nbuf];
+-    int __nc = __libcpp_snprintf_l(__nar, sizeof(__nar), _LIBCPP_GET_C_LOCALE, __fmt, __v);
++    int __nc = __libcpp_snprintf_l(__nar, __nbuf, _LIBCPP_GET_C_LOCALE, __fmt, __v);
+     char* __ne = __nar + __nc;
+     char* __np = this->__identify_padding(__nar, __ne, __iob);
+     // Stage 2 - Widen __nar while adding thousands separators
+@@ -1533,7 +1533,7 @@ num_put<_CharT, _OutputIterator>::do_put(iter_type __s, ios_base& __iob,
+                           + ((__iob.flags() & ios_base::showbase) != 0)
+                           + 1;
+     char __nar[__nbuf];
+-    int __nc = __libcpp_snprintf_l(__nar, sizeof(__nar), _LIBCPP_GET_C_LOCALE, __fmt, __v);
++    int __nc = __libcpp_snprintf_l(__nar, __nbuf, _LIBCPP_GET_C_LOCALE, __fmt, __v);
+     char* __ne = __nar + __nc;
+     char* __np = this->__identify_padding(__nar, __ne, __iob);
+     // Stage 2 - Widen __nar while adding thousands separators
+@@ -1657,7 +1657,7 @@ num_put<_CharT, _OutputIterator>::do_put(iter_type __s, ios_base& __iob,
+     char __fmt[6] = "%p";
+     const unsigned __nbuf = 20;
+     char __nar[__nbuf];
+-    int __nc = __libcpp_snprintf_l(__nar, sizeof(__nar), _LIBCPP_GET_C_LOCALE, __fmt, __v);
++    int __nc = __libcpp_snprintf_l(__nar, __nbuf, _LIBCPP_GET_C_LOCALE, __fmt, __v);
+     char* __ne = __nar + __nc;
+     char* __np = this->__identify_padding(__nar, __ne, __iob);
+     // Stage 2 - Widen __nar

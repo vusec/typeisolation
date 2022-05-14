@@ -1,0 +1,60 @@
+Index: cmake/config-ix.cmake
+===================================================================
+--- cmake/config-ix.cmake	(revision 304552)
++++ cmake/config-ix.cmake	(working copy)
+@@ -170,7 +170,7 @@
+ set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} ${MIPS64} ${ARM64} ${PPC64})
+ set(ALL_UBSAN_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32} ${ARM64}
+     ${MIPS32} ${MIPS64} ${PPC64} ${S390X})
+-set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM64} ${MIPS32} ${MIPS64})
++set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86_64})
+ set(ALL_CFI_SUPPORTED_ARCH ${X86} ${X86_64} ${MIPS64})
+ set(ALL_ESAN_SUPPORTED_ARCH ${X86_64} ${MIPS64})
+ set(ALL_SCUDO_SUPPORTED_ARCH ${X86} ${X86_64} ${ARM32})
+Index: lib/safestack/CMakeLists.txt
+===================================================================
+--- lib/safestack/CMakeLists.txt	(revision 304552)
++++ lib/safestack/CMakeLists.txt	(working copy)
+@@ -5,6 +5,7 @@
+ include_directories(..)
+ 
+ set(SAFESTACK_CFLAGS ${SANITIZER_COMMON_CFLAGS})
++append_rtti_flag(OFF SAFESTACK_CFLAGS)
+ 
+ if(APPLE)
+   # Build universal binary on APPLE.
+Index: lib/safestack/safestack.cc
+===================================================================
+--- lib/safestack/safestack.cc	(revision 304552)
++++ lib/safestack/safestack.cc	(working copy)
+@@ -94,9 +94,21 @@
+ 
+ using namespace __sanitizer;
+ 
++extern "C" {
++
++__attribute__((weak)) void unsafe_stack_alloc_meta(void *addr, size_t size, bool islarge);
++
++__attribute__((weak)) void unsafe_stack_free_meta(void *unsafe_stack_start, size_t unsafe_stack_size, bool islarge);
++
++}
++
+ static inline void *unsafe_stack_alloc(size_t size, size_t guard) {
+   CHECK_GE(size + guard, size);
+-  void *addr = MmapOrDie(size + guard, "unsafe_stack_alloc");
++  void *addr;
++  addr = MmapOrDie(size + guard, "unsafe_stack_alloc");
++  if (unsafe_stack_alloc_meta != nullptr) {
++    unsafe_stack_alloc_meta((char *)addr + guard, size, false);
++  }
+   MprotectNoAccess((uptr)addr, (uptr)guard);
+   return (char *)addr + guard;
+ }
+@@ -117,6 +129,7 @@
+   if (unsafe_stack_start) {
+     UnmapOrDie((char *)unsafe_stack_start - unsafe_stack_guard,
+                unsafe_stack_size + unsafe_stack_guard);
++    unsafe_stack_free_meta(unsafe_stack_start, unsafe_stack_size, false);
+   }
+   unsafe_stack_start = nullptr;
+ }

@@ -1,0 +1,25 @@
+--- a/benchspec/CPU2006/471.omnetpp/src/libs/cmdenv/heap.cc
++++ b/benchspec/CPU2006/471.omnetpp/src/libs/cmdenv/heap.cc
+@@ -295,6 +295,7 @@
+ }
+ #endif
+ 
++#ifndef DISABLE_CONFLICTING_OPERATORS
+ void *operator new(size_t m)
+ {
+ #ifdef HEAPCHECK
+@@ -355,7 +356,9 @@
+          return p;   // to suppress compiler warning
+       }
+ }
++#endif
+ 
++#ifndef DISABLE_CONFLICTING_OPERATORS
+ void operator delete(void *p)
+ {
+ #ifdef HEAPCHECK
+@@ -400,3 +403,4 @@
+     if(id==breakat) brk("DELETE");
+ #endif
+ }
++#endif

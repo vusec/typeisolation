@@ -1,0 +1,8 @@
+STAT(count_dynamic)
+STAT(count_restore)
+STAT(count_return)
+STAT(count_stackptrs)
+STAT(count_static)
+STAT(func)
+STAT(func_nothing)
+STAT(func_onlyreads)

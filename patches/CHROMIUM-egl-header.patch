@@ -1,0 +1,13 @@
+diff --git chromium.orig/src/ui/gl/egl_util.cc chromium/src/ui/gl/egl_util.cc
+index 77044f4..44df5ee 100644
+--- chromium.orig/src/ui/gl/egl_util.cc
++++ chromium/src/ui/gl/egl_util.cc
+@@ -6,7 +6,7 @@
+ 
+ #include "build/build_config.h"
+ 
+-#if defined(OS_ANDROID)
++#if defined(OS_ANDROID) || 1
+ #include <EGL/egl.h>
+ #else
+ #include "third_party/khronos/EGL/egl.h"

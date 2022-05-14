@@ -1,0 +1,137 @@
+--- ../../dl-load.c	2012-01-01 13:16:32.000000000 +0100
++++ elf/dl-load.c	2015-11-20 11:08:36.032513136 +0100
+@@ -39,6 +39,10 @@
+ 
+ #include <dl-dst.h>
+ 
++#define ARENASIZE ((unsigned long)1 << 32)
++#define ARENAMASK (~(ARENASIZE - 1))
++#define METADATAOFFSET (ARENASIZE / 2)
++
+ /* On some systems, no flag bits are given to specify file mapping.  */
+ #ifndef MAP_FILE
+ # define MAP_FILE	0
+@@ -1261,35 +1265,99 @@
+     /* Length of the sections to be loaded.  */
+     maplength = loadcmds[nloadcmds - 1].allocend - c->mapstart;
+ 
+-    if (__builtin_expect (type, ET_DYN) == ET_DYN)
+-      {
++    unsigned long arena_offset;
++
++    if (maplength > (ARENASIZE / 2))
++	  {
++	  size_error:
++	    errstring = N_("failed to map segment from shared object (too large for arena)");
++	    goto call_lose_errno;
++	  }        
++
++    if (__builtin_expect (type, ET_DYN) == ET_DYN) {
+ 	/* This is a position-independent shared object.  We can let the
+ 	   kernel map it anywhere it likes, but we must have space for all
+ 	   the segments in their specified positions relative to the first.
+ 	   So we map the first segment without MAP_FIXED, but with its
+ 	   extent increased to cover all the segments.  Then we remove
+ 	   access from excess portion, and there is known sufficient space
+-	   there to remap from the later segments.
+-
+-	   As a refinement, sometimes we have an address that we would
+-	   prefer to map such objects at; but this is only a preference,
+-	   the OS can do whatever it likes. */
+-	ElfW(Addr) mappref;
+-	mappref = (ELF_PREFERRED_ADDRESS (loader, maplength,
+-					  c->mapstart & GLRO(dl_use_load_bias))
+-		   - MAP_BASE_ADDR (l));
+-
++	   there to remap from the later segments.*/
+ 	/* Remember which part of the address space this object uses.  */
+-	l->l_map_start = (ElfW(Addr)) __mmap ((void *) mappref, maplength,
+-					      c->prot,
+-					      MAP_COPY|MAP_FILE,
+-					      fd, c->mapoff);
++	void *candidate = __mmap (0, ARENASIZE,
++					      PROT_WRITE | PROT_READ,
++					      MAP_ANONYMOUS|MAP_PRIVATE,
++					      -1, 0);
++	if (__builtin_expect ((void *) candidate == MAP_FAILED, 0))
++	  {
++	  arenamap1_error:
++	    errstring = N_("failed to map arena from shared object");
++	    goto call_lose_errno;
++	  }
++    
++    if ((unsigned long)candidate % ARENAMASK != 0) {
++      __munmap(candidate, ARENASIZE);
++      candidate = __mmap (0, 2 * ARENASIZE,
++					      PROT_WRITE | PROT_READ,
++					      MAP_ANONYMOUS|MAP_PRIVATE,
++					      -1, 0);
++	  if (__builtin_expect ((void *) candidate == MAP_FAILED, 0))
++	    {
++	    arenamap2_error:
++	      errstring = N_("failed to map arena from shared object");
++	      goto call_lose_errno;
++	    }
++      unsigned long arena_start = ((unsigned long)candidate + ARENASIZE - 1) & ARENAMASK;
++      l->l_map_start = (ElfW(Addr))arena_start;
++      unsigned long arena_start_offset = arena_start - (unsigned long)candidate;
++      __munmap (candidate, arena_start_offset);
++      if (ARENASIZE - arena_start_offset > 0)
++        __munmap ((void*)(arena_start + ARENASIZE), ARENASIZE - arena_start_offset);
++    } else {
++      l->l_map_start = (ElfW(Addr))candidate;
++    }
++
++    arena_offset = 0;
++    
++    } else {
++    /* This object is loaded at a fixed address.  This must never
++       happen for objects loaded with dlopen().  */
++    if (__builtin_expect ((mode & __RTLD_OPENEXEC) == 0, 0))
++      {
++	errstring = N_("cannot dynamically load executable");
++	goto call_lose;
++      }
++    /* This is a fixed position object */
++    if (l->l_addr + c->mapstart >= METADATAOFFSET)
++      {
++        errstring = N_("fixed address outside of supported range of arena");
++	    goto call_lose;
++      }
++	l->l_map_start = (ElfW(Addr)) __mmap ((void *) (l->l_addr + c->mapstart),
++                          ARENASIZE - (l->l_addr + c->mapstart),
++					      PROT_WRITE | PROT_READ,
++					      MAP_FIXED|MAP_ANONYMOUS|MAP_PRIVATE,
++					      -1, 0);
+ 	if (__builtin_expect ((void *) l->l_map_start == MAP_FAILED, 0))
+ 	  {
+ 	  map_error:
+ 	    errstring = N_("failed to map segment from shared object");
+ 	    goto call_lose_errno;
+ 	  }
++    arena_offset = l->l_addr + c->mapstart;
++    /* Notify ELF_PREFERRED_ADDRESS that we have to load this one
++       fixed.  */
++    ELF_FIXED_ADDRESS (loader, c->mapstart);
++    }
++
++	  __mprotect ((caddr_t) (l->l_map_start + ((maplength + GLRO(dl_pagesize) - 1)
++			& ~(GLRO(dl_pagesize) - 1))),
++		      METADATAOFFSET - arena_offset - maplength,
++		      PROT_NONE);
++
++	__mmap ((void *) l->l_map_start, maplength,
++					      c->prot,
++					      MAP_FIXED|MAP_COPY|MAP_FILE,
++					      fd, c->mapoff);
+ 
+ 	l->l_map_end = l->l_map_start + maplength;
+ 	l->l_addr = l->l_map_start - c->mapstart;
+@@ -1307,7 +1375,6 @@
+ 	l->l_contiguous = 1;
+ 
+ 	goto postmap;
+-      }
+ 
+     /* This object is loaded at a fixed address.  This must never
+        happen for objects loaded with dlopen().  */

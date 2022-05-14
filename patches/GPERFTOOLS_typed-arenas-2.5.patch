@@ -1,0 +1,1123 @@
+commit 3978bf1ee22b1b68197b7eb2d7d4407673db4b72
+Author: Alyssa Milburn <amilburn@zall.org>
+Date:   Thu Mar 25 14:32:33 2021 +0100
+
+    arena patch
+
+diff --git a/src/central_freelist.cc b/src/central_freelist.cc
+index bae34af..97a4f66 100644
+--- a/src/central_freelist.cc
++++ b/src/central_freelist.cc
+@@ -328,7 +328,7 @@ void CentralFreeList::Populate() {
+   Span* span;
+   {
+     SpinLockHolder h(Static::pageheap_lock());
+-    span = Static::pageheap()->New(npages);
++    span = Static::pageheap()->New(npages, type_);
+     if (span) Static::pageheap()->RegisterSizeClass(span, size_class_);
+   }
+   if (span == NULL) {
+diff --git a/src/common.h b/src/common.h
+index bb06593..a7cd029 100644
+--- a/src/common.h
++++ b/src/common.h
+@@ -306,7 +306,15 @@ class TypeMap {
+     struct node **hashtable_;
+     size_t hashtablesizemask_;
+   public:
++    TypeMap() {
++      allocator_ = NULL;
++      hashtablesizemask_ = 0;
++      hashtable_ = NULL;
++    }
+     TypeMap(void *(*allocator)(size_t), int hashtablesizeshift) {
++      Init(allocator, hashtablesizeshift);
++    }
++    void Init(void *(*allocator)(size_t), int hashtablesizeshift) {
+       allocator_ = allocator;
+       hashtablesizemask_ = (1UL << hashtablesizeshift) - 1;
+       hashtable_ = (struct node **) allocator(sizeof(struct node *) << hashtablesizeshift);
+diff --git a/src/page_heap.cc b/src/page_heap.cc
+index f52ae2a..695aad6 100644
+--- a/src/page_heap.cc
++++ b/src/page_heap.cc
+@@ -44,6 +44,8 @@
+ #include "static_vars.h"       // for Static
+ #include "system-alloc.h"      // for TCMalloc_SystemAlloc, etc
+ 
++#include <sys/mman.h> // arenas
++
+ DEFINE_double(tcmalloc_release_rate,
+               EnvToDouble("TCMALLOC_RELEASE_RATE", 1.0),
+               "Rate at which we release unused memory to the system.  "
+@@ -70,18 +72,31 @@ PageHeap::PageHeap()
+       release_index_(kMaxPages),
+       aggressive_decommit_(false) {
+   COMPILE_ASSERT(kNumClasses <= (1 << PageMapCache::kValuebits), valuebits);
++  typearena_map_.Init(MetaDataAlloc, 12);
++  typelist_map_.Init(MetaDataAlloc, 12);
++}
++
++void PageHeap::initSpanList(SpanList *sl, TypeTag type) {
++  for (int i = 0; i < kMaxPages + 1; i++) {
++    DLL_Init(&sl[i].normal);
++    DLL_Init(&sl[i].returned);
++  }
++#if 0
+   DLL_Init(&large_.normal);
+   DLL_Init(&large_.returned);
+   for (int i = 0; i < kMaxPages; i++) {
+     DLL_Init(&free_[i].normal);
+     DLL_Init(&free_[i].returned);
+   }
++#endif
+ }
+ 
+-Span* PageHeap::SearchFreeAndLargeLists(Length n) {
+-  ASSERT(Check());
++Span* PageHeap::SearchFreeAndLargeLists(Length n, TypeTag type) {
++  ASSERT(Check(type));
+   ASSERT(n > 0);
+ 
++  SpanList *free_ = getFree(type);
++
+   // Find first size >= n that has a non-empty list
+   for (Length s = n; s < kMaxPages; s++) {
+     Span* ll = &free_[s].normal;
+@@ -98,7 +113,7 @@ Span* PageHeap::SearchFreeAndLargeLists(Length n) {
+       // Calling EnsureLimit here is not very expensive, as it fails only if
+       // there is no more normal spans (and it fails efficiently)
+       // or SystemRelease does not work (there is probably no returned spans).
+-      if (EnsureLimit(n)) {
++      if (EnsureLimit(n, type)) {
+         // ll may have became empty due to coalescing
+         if (!DLL_IsEmpty(ll)) {
+           ASSERT(ll->next->location == Span::ON_RETURNED_FREELIST);
+@@ -108,16 +123,16 @@ Span* PageHeap::SearchFreeAndLargeLists(Length n) {
+     }
+   }
+   // No luck in free lists, our last chance is in a larger class.
+-  return AllocLarge(n);  // May be NULL
++  return AllocLarge(n, type);  // May be NULL
+ }
+ 
+ static const size_t kForcedCoalesceInterval = 128*1024*1024;
+ 
+-Span* PageHeap::New(Length n) {
+-  ASSERT(Check());
++Span* PageHeap::New(Length n, TypeTag type) {
++  ASSERT(Check(type));
+   ASSERT(n > 0);
+ 
+-  Span* result = SearchFreeAndLargeLists(n);
++  Span* result = SearchFreeAndLargeLists(n, type);
+   if (result != NULL)
+     return result;
+ 
+@@ -141,7 +156,7 @@ Span* PageHeap::New(Length n) {
+     //
+     // See also large_heap_fragmentation_unittest.cc and
+     // https://code.google.com/p/gperftools/issues/detail?id=368
+-    ReleaseAtLeastNPages(static_cast<Length>(0x7fffffff));
++    ReleaseAtLeastNPages(static_cast<Length>(0x7fffffff), type);
+ 
+     // then try again. If we are forced to grow heap because of large
+     // spans fragmentation and not because of problem described above,
+@@ -149,14 +164,14 @@ Span* PageHeap::New(Length n) {
+     // insufficiently big large spans back to OS. So in case of really
+     // unlucky memory fragmentation we'll be consuming virtual address
+     // space, but not real memory
+-    result = SearchFreeAndLargeLists(n);
++    result = SearchFreeAndLargeLists(n, type);
+     if (result != NULL) return result;
+   }
+ 
+   // Grow the heap and try again.
+-  if (!GrowHeap(n)) {
++  if (!GrowHeap(n, type)) {
+     ASSERT(stats_.unmapped_bytes+ stats_.committed_bytes==stats_.system_bytes);
+-    ASSERT(Check());
++    ASSERT(Check(type));
+     // underlying SysAllocator likely set ENOMEM but we can get here
+     // due to EnsureLimit so we set it here too.
+     //
+@@ -165,14 +180,16 @@ Span* PageHeap::New(Length n) {
+     errno = ENOMEM;
+     return NULL;
+   }
+-  return SearchFreeAndLargeLists(n);
++  return SearchFreeAndLargeLists(n, type);
+ }
+ 
+-Span* PageHeap::AllocLarge(Length n) {
++Span* PageHeap::AllocLarge(Length n, TypeTag type) {
+   // find the best span (closest to n in size).
+   // The following loops implements address-ordered best-fit.
+   Span *best = NULL;
+ 
++  SpanList &large_ = getLarge(type);
++
+   // Search through normal list
+   for (Span* span = large_.normal.next;
+        span != &large_.normal;
+@@ -209,15 +226,15 @@ Span* PageHeap::AllocLarge(Length n) {
+ 
+   // best comes from returned list.
+ 
+-  if (EnsureLimit(n, false)) {
++  if (EnsureLimit(n, type, false)) {
+     return Carve(best, n);
+   }
+ 
+-  if (EnsureLimit(n, true)) {
++  if (EnsureLimit(n, type, true)) {
+     // best could have been destroyed by coalescing.
+     // bestNormal is not a best-fit, and it could be destroyed as well.
+     // We retry, the limit is already ensured:
+-    return AllocLarge(n);
++    return AllocLarge(n, type);
+   }
+ 
+   // If bestNormal existed, EnsureLimit would succeeded:
+@@ -234,7 +251,7 @@ Span* PageHeap::Split(Span* span, Length n) {
+   Event(span, 'T', n);
+ 
+   const int extra = span->length - n;
+-  Span* leftover = NewSpan(span->start + n, extra);
++  Span* leftover = NewSpan(span->start + n, extra, span->type);
+   ASSERT(leftover->location == Span::IN_USE);
+   Event(leftover, 'U', extra);
+   RecordSpan(leftover);
+@@ -271,7 +288,7 @@ Span* PageHeap::Carve(Span* span, Length n) {
+   const int extra = span->length - n;
+   ASSERT(extra >= 0);
+   if (extra > 0) {
+-    Span* leftover = NewSpan(span->start + n, extra);
++    Span* leftover = NewSpan(span->start + n, extra, span->type);
+     leftover->location = old_location;
+     Event(leftover, 'S', extra);
+     RecordSpan(leftover);
+@@ -292,7 +309,7 @@ Span* PageHeap::Carve(Span* span, Length n) {
+     span->length = n;
+     pagemap_.set(span->start + n - 1, span);
+   }
+-  ASSERT(Check());
++  ASSERT(Check(span->type));
+   if (old_location == Span::ON_RETURNED_FREELIST) {
+     // We need to recommit this address space.
+     CommitSpan(span);
+@@ -304,7 +321,8 @@ Span* PageHeap::Carve(Span* span, Length n) {
+ }
+ 
+ void PageHeap::Delete(Span* span) {
+-  ASSERT(Check());
++  TypeTag type = span->type;
++  ASSERT(Check(type));
+   ASSERT(span->location == Span::IN_USE);
+   ASSERT(span->length > 0);
+   ASSERT(GetDescriptor(span->start) == span);
+@@ -315,9 +333,9 @@ void PageHeap::Delete(Span* span) {
+   span->location = Span::ON_NORMAL_FREELIST;
+   Event(span, 'D', span->length);
+   MergeIntoFreeList(span);  // Coalesces if possible
+-  IncrementalScavenge(n);
++  IncrementalScavenge(n, type);
+   ASSERT(stats_.unmapped_bytes+ stats_.committed_bytes==stats_.system_bytes);
+-  ASSERT(Check());
++  ASSERT(Check(type));
+ }
+ 
+ bool PageHeap::MayMergeSpans(Span *span, Span *other) {
+@@ -364,6 +382,7 @@ void PageHeap::MergeIntoFreeList(Span* span) {
+   if (prev != NULL && MayMergeSpans(span, prev)) {
+     // Merge preceding span into this span
+     ASSERT(prev->start + prev->length == p);
++    ASSERT(prev->type == span->type); // arena
+     const Length len = prev->length;
+     if (aggressive_decommit_ && prev->location == Span::ON_RETURNED_FREELIST) {
+       // We're about to put the merge span into the returned freelist and call
+@@ -384,6 +403,7 @@ void PageHeap::MergeIntoFreeList(Span* span) {
+   if (next != NULL && MayMergeSpans(span, next)) {
+     // Merge next span into this span
+     ASSERT(next->start == p+n);
++    ASSERT(next->type == span->type); // arena
+     const Length len = next->length;
+     if (aggressive_decommit_ && next->location == Span::ON_RETURNED_FREELIST) {
+       // See the comment below 'if (prev->location ...' for explanation.
+@@ -409,6 +429,8 @@ void PageHeap::MergeIntoFreeList(Span* span) {
+ 
+ void PageHeap::PrependToFreeList(Span* span) {
+   ASSERT(span->location != Span::IN_USE);
++  SpanList *free_ = getFree(span->type);
++  SpanList &large_ = getLarge(span->type);
+   SpanList* list = (span->length < kMaxPages) ? &free_[span->length] : &large_;
+   if (span->location == Span::ON_NORMAL_FREELIST) {
+     stats_.free_bytes += (span->length << kPageShift);
+@@ -429,7 +451,7 @@ void PageHeap::RemoveFromFreeList(Span* span) {
+   DLL_Remove(span);
+ }
+ 
+-void PageHeap::IncrementalScavenge(Length n) {
++void PageHeap::IncrementalScavenge(Length n, TypeTag type) {
+   // Fast path; not yet time to release memory
+   scavenge_counter_ -= n;
+   if (scavenge_counter_ >= 0) return;  // Not yet time to scavenge
+@@ -441,7 +463,7 @@ void PageHeap::IncrementalScavenge(Length n) {
+     return;
+   }
+ 
+-  Length released_pages = ReleaseAtLeastNPages(1);
++  Length released_pages = ReleaseAtLeastNPages(1, type);
+ 
+   if (released_pages == 0) {
+     // Nothing to scavenge, delay for a while.
+@@ -475,9 +497,12 @@ Length PageHeap::ReleaseLastNormalSpan(SpanList* slist) {
+   return 0;
+ }
+ 
+-Length PageHeap::ReleaseAtLeastNPages(Length num_pages) {
++Length PageHeap::ReleaseAtLeastNPages(Length num_pages, TypeTag type) {
+   Length released_pages = 0;
+ 
++  SpanList *free_ = getFree(type);
++  SpanList &large_ = getLarge(type);
++
+   // Round robin through the lists of free spans, releasing the last
+   // span in each list.  Stop after releasing at least num_pages
+   // or when there is nothing more to release.
+@@ -498,7 +523,7 @@ Length PageHeap::ReleaseAtLeastNPages(Length num_pages) {
+   return released_pages;
+ }
+ 
+-bool PageHeap::EnsureLimit(Length n, bool withRelease)
++bool PageHeap::EnsureLimit(Length n, TypeTag type, bool withRelease)
+ {
+   Length limit = (FLAGS_tcmalloc_heap_limit_mb*1024*1024) >> kPageShift;
+   if (limit == 0) return true; //there is no limit
+@@ -516,7 +541,7 @@ bool PageHeap::EnsureLimit(Length n, bool withRelease)
+   takenPages -= stats_.unmapped_bytes >> kPageShift;
+ 
+   if (takenPages + n > limit && withRelease) {
+-    takenPages -= ReleaseAtLeastNPages(takenPages + n - limit);
++    takenPages -= ReleaseAtLeastNPages(takenPages + n - limit, type);
+   }
+ 
+   return takenPages + n <= limit;
+@@ -535,14 +560,14 @@ void PageHeap::RegisterSizeClass(Span* span, size_t sc) {
+ }
+ 
+ void PageHeap::GetSmallSpanStats(SmallSpanStats* result) {
+-  for (int s = 0; s < kMaxPages; s++) {
++  /*for (int s = 0; s < kMaxPages; s++) {
+     result->normal_length[s] = DLL_Length(&free_[s].normal);
+     result->returned_length[s] = DLL_Length(&free_[s].returned);
+-  }
++  }*/
+ }
+ 
+ void PageHeap::GetLargeSpanStats(LargeSpanStats* result) {
+-  result->spans = 0;
++/*  result->spans = 0;
+   result->normal_pages = 0;
+   result->returned_pages = 0;
+   for (Span* s = large_.normal.next; s != &large_.normal; s = s->next) {
+@@ -552,7 +577,7 @@ void PageHeap::GetLargeSpanStats(LargeSpanStats* result) {
+   for (Span* s = large_.returned.next; s != &large_.returned; s = s->next) {
+     result->returned_pages += s->length;
+     result->spans++;
+-  }
++  }*/
+ }
+ 
+ bool PageHeap::GetNextRange(PageID start, base::MallocRange* r) {
+@@ -594,10 +619,84 @@ static void RecordGrowth(size_t growth) {
+   Static::set_growth_stacks(t);
+ }
+ 
+-bool PageHeap::GrowHeap(Length n) {
++#define kArenaSize (4*1024*1024*1024ull)
++#define GUARD_MULTIPLIER 8
++#define kArenaGuardSize (GUARD_MULTIPLIER*4*1024*1024*1024ull)
++#define kArenasPerTime (128)
++#define kArenaAllocAlignment kPageSize
++#define kArenaUsableSize ((4*1024*1024*1024ull) - kArenaAllocAlignment*2)
++static char *g_next_arena_base = NULL;
++static int g_arena_remaining = 0;
++
++bool PageHeap::GrowHeap(Length n, TypeTag type) {
+   ASSERT(kMaxPages >= kMinSystemAlloc);
+   if (n > kMaxValidPages) return false;
+   Length ask = (n>kMinSystemAlloc) ? n : static_cast<Length>(kMinSystemAlloc);
++
++  // huuuge sanity limit
++  if (ask > kArenaGuardSize*64ull)
++    return false;
++  /*if (ask > (kArenaUsableSize >> kPageShift))
++    return false;*/
++
++  size_t actual_size = (((size_t)(ask << kPageShift) + kArenaAllocAlignment - 1) / kArenaAllocAlignment) * kArenaAllocAlignment;
++
++  // FIXME: thread safety
++  void *arMapPtr = typearena_map_.get(type);
++  TypeArena *arMap = (TypeArena *)arMapPtr;
++  // FIXME: we waste a bit of vaddr space this way...
++  if (!arMapPtr || (arMap->remaining < actual_size)) {
++    uint64_t neededArenaSpace = 1;
++    if (actual_size > kArenaUsableSize) {
++      // FIXME: this is not accurate but it serves to cope with large allocs
++      neededArenaSpace = 1 + 1 + ((actual_size - kArenaUsableSize) / (kArenaSize + kArenaGuardSize));
++    }
++    if (g_arena_remaining < neededArenaSpace) {
++      // FIXME: this leaks the old bits of arena vaddr in the [super rare] large alloc case
++      // we should dump the remainder of the old arena(s) in the heap too
++      size_t actual_bytes;
++      g_next_arena_base = (char *)TCMalloc_SystemAlloc((kArenaGuardSize + kArenaSize) * kArenasPerTime + kArenaGuardSize, &actual_bytes, kArenaSize, true);
++      if (!g_next_arena_base) {
++         Log(kLog, __FILE__, __LINE__,
++          "tcmalloc: failed to allocate new arena", 0);
++        return false; /* oh-oh */
++      }
++      mprotect(g_next_arena_base, kArenaGuardSize, PROT_NONE);
++      g_next_arena_base += kArenaGuardSize;
++      g_arena_remaining = kArenasPerTime;
++    }
++    // TODO: maybe use allocator for this..
++    arMapPtr = MetaDataAlloc(sizeof(TypeArena));
++    arMap = (TypeArena *)arMapPtr;
++    /* we leave one page at the start/end to avoid most pointer-out-of-bounds issues */
++    arMap->base = g_next_arena_base + kArenaAllocAlignment;
++    uint64_t extraArenaSpace = (neededArenaSpace - 1) * (kArenaGuardSize + kArenaSize);
++    arMap->remaining = kArenaUsableSize + extraArenaSpace;
++    typearena_map_.set(type, arMap);
++    mprotect(g_next_arena_base + kArenaSize + extraArenaSpace, kArenaGuardSize, PROT_NONE);
++    g_next_arena_base += kArenaSize + kArenaGuardSize + extraArenaSpace;
++    g_arena_remaining -= neededArenaSpace;
++
++#ifdef DEBUG_HELP
++    mprotect(arMap->base, kArenaSize, PROT_NONE);
++#endif
++  }
++
++  // TODO think about this
++  if (!EnsureLimit(ask, type))
++    return false;
++
++  // allocate inside the arena for this type
++  if (arMap->remaining < actual_size)
++    return false;
++  arMap->remaining -= actual_size;
++  void *ptr = arMap->base;
++  arMap->base = (char *)arMap->base + actual_size;
++#ifdef DEBUG_HELP
++  mprotect(ptr, actual_size, PROT_READ | PROT_WRITE);
++#endif
++
++#if 0
+   size_t actual_size;
+   void* ptr = NULL;
+   if (EnsureLimit(ask)) {
+@@ -613,6 +712,7 @@ bool PageHeap::GrowHeap(Length n) {
+     }
+     if (ptr == NULL) return false;
+   }
++#endif
+   ask = actual_size >> kPageShift;
+   RecordGrowth(ask << kPageShift);
+ 
+@@ -637,11 +737,11 @@ bool PageHeap::GrowHeap(Length n) {
+   if (pagemap_.Ensure(p-1, ask+2)) {
+     // Pretend the new area is allocated and then Delete() it to cause
+     // any necessary coalescing to occur.
+-    Span* span = NewSpan(p, ask);
++    Span* span = NewSpan(p, ask, type);
+     RecordSpan(span);
+     Delete(span);
+     ASSERT(stats_.unmapped_bytes+ stats_.committed_bytes==stats_.system_bytes);
+-    ASSERT(Check());
++    ASSERT(Check(type));
+     return true;
+   } else {
+     // We could not allocate memory within "pagemap_"
+@@ -651,19 +751,26 @@ bool PageHeap::GrowHeap(Length n) {
+ }
+ 
+ bool PageHeap::Check() {
+-  ASSERT(free_[0].normal.next == &free_[0].normal);
+-  ASSERT(free_[0].returned.next == &free_[0].returned);
++//  ASSERT(free_[0].normal.next == &free_[0].normal);
++//  ASSERT(free_[0].returned.next == &free_[0].returned);
++  return true;
++}
++
++bool PageHeap::Check(TypeTag type) {
++  SpanList *free_ = getFree(type);
++  ASSERT(free_->normal.next == &free_->normal);
++  ASSERT(free_->returned.next == &free_->returned);
+   return true;
+ }
+ 
+ bool PageHeap::CheckExpensive() {
+   bool result = Check();
+-  CheckList(&large_.normal, kMaxPages, 1000000000, Span::ON_NORMAL_FREELIST);
++/*  CheckList(&large_.normal, kMaxPages, 1000000000, Span::ON_NORMAL_FREELIST);
+   CheckList(&large_.returned, kMaxPages, 1000000000, Span::ON_RETURNED_FREELIST);
+   for (Length s = 1; s < kMaxPages; s++) {
+     CheckList(&free_[s].normal, s, s, Span::ON_NORMAL_FREELIST);
+     CheckList(&free_[s].returned, s, s, Span::ON_RETURNED_FREELIST);
+-  }
++  }*/
+   return result;
+ }
+ 
+diff --git a/src/page_heap.h b/src/page_heap.h
+index 18abed1..2d7e2b4 100644
+--- a/src/page_heap.h
++++ b/src/page_heap.h
+@@ -105,10 +105,17 @@ class PERFTOOLS_DLL_DECL PageHeap {
+  public:
+   PageHeap();
+ 
++  struct TypeArena {
++    void *base;
++    uint64_t remaining;
++  };
++  typedef TypeMap<TypeArena> TypeArenaMap;
++  TypeArenaMap typearena_map_;
++
+   // Allocate a run of "n" pages.  Returns zero if out of memory.
+   // Caller should not pass "n == 0" -- instead, n should have
+   // been rounded up already.
+-  Span* New(Length n);
++  Span* New(Length n, TypeTag type = 0);
+ 
+   // Delete the span "[p, p+n-1]".
+   // REQUIRES: span was returned by earlier call to New() and
+@@ -169,6 +176,7 @@ class PERFTOOLS_DLL_DECL PageHeap {
+   void GetLargeSpanStats(LargeSpanStats* result);
+ 
+   bool Check();
++  bool Check(TypeTag tag);
+   // Like Check() but does some more comprehensive checking.
+   bool CheckExpensive();
+   bool CheckList(Span* list, Length min_pages, Length max_pages,
+@@ -180,7 +188,7 @@ class PERFTOOLS_DLL_DECL PageHeap {
+   // may also be larger than num_pages since page_heap might decide to
+   // release one large range instead of fragmenting it into two
+   // smaller released and unreleased ranges.
+-  Length ReleaseAtLeastNPages(Length num_pages);
++  Length ReleaseAtLeastNPages(Length num_pages, TypeTag type);
+ 
+   // Return 0 if we have no information, or else the correct sizeclass for p.
+   // Reads and writes to pagemap_cache_ do not require locking.
+@@ -235,17 +243,38 @@ class PERFTOOLS_DLL_DECL PageHeap {
+   };
+ 
+   // List of free spans of length >= kMaxPages
+-  SpanList large_;
++//  SpanList large_;
+ 
+   // Array mapping from span length to a doubly linked list of free spans
+-  SpanList free_[kMaxPages];
++//  SpanList free_[kMaxPages];
++
++  void initSpanList(SpanList *sl, TypeTag type);
++
++  // first is large_, remainder are free_
++  typedef TypeMap<SpanList> TypeSpanListMap;
++  TypeSpanListMap typelist_map_;
++  SpanList *getSpanList(TypeTag type) {
++    SpanList *sl = typelist_map_.get(type);
++    if (!sl) {
++      sl = (SpanList *)MetaDataAlloc(sizeof(SpanList) * (kMaxPages + 1));
++      initSpanList(sl, type);
++      typelist_map_.set(type, sl);
++    }
++    return sl;
++  }
++  SpanList &getLarge(TypeTag type) {
++    return *getSpanList(type);
++  }
++  SpanList *getFree(TypeTag type) {
++    return getSpanList(type) + 1;
++  }
+ 
+   // Statistics on system, free, and unmapped bytes
+   Stats stats_;
+ 
+-  Span* SearchFreeAndLargeLists(Length n);
++  Span* SearchFreeAndLargeLists(Length n, TypeTag type);
+ 
+-  bool GrowHeap(Length n);
++  bool GrowHeap(Length n, TypeTag type);
+ 
+   // REQUIRES: span->length >= n
+   // REQUIRES: span->location != IN_USE
+@@ -265,7 +294,7 @@ class PERFTOOLS_DLL_DECL PageHeap {
+ 
+   // Allocate a large span of length == n.  If successful, returns a
+   // span of exactly the specified length.  Else, returns NULL.
+-  Span* AllocLarge(Length n);
++  Span* AllocLarge(Length n, TypeTag type);
+ 
+   // Coalesce span with neighboring spans if possible, prepend to
+   // appropriate free list, and adjust stats.
+@@ -285,7 +314,7 @@ class PERFTOOLS_DLL_DECL PageHeap {
+ 
+   // Incrementally release some memory to the system.
+   // IncrementalScavenge(n) is called whenever n pages are freed.
+-  void IncrementalScavenge(Length n);
++  void IncrementalScavenge(Length n, TypeTag type);
+ 
+   // Release the last span on the normal portion of this list.
+   // Return the length of that span or zero if release failed.
+@@ -294,7 +323,7 @@ class PERFTOOLS_DLL_DECL PageHeap {
+   // Checks if we are allowed to take more memory from the system.
+   // If limit is reached and allowRelease is true, tries to release
+   // some unused spans.
+-  bool EnsureLimit(Length n, bool allowRelease = true);
++  bool EnsureLimit(Length n, TypeTag type, bool allowRelease = true);
+ 
+   bool MayMergeSpans(Span *span, Span *other);
+ 
+diff --git a/src/span.cc b/src/span.cc
+index 4d08964..ec2fd8c 100644
+--- a/src/span.cc
++++ b/src/span.cc
+@@ -51,7 +51,7 @@ void Event(Span* span, char op, int v = 0) {
+ }
+ #endif
+ 
+-Span* NewSpan(PageID p, Length len) {
++Span* NewSpan(PageID p, Length len, TypeTag type) {
+   Span* result = Static::span_allocator()->New();
+   memset(result, 0, sizeof(*result));
+   result->start = p;
+@@ -59,6 +59,7 @@ Span* NewSpan(PageID p, Length len) {
+ #ifdef SPAN_HISTORY
+   result->nexthistory = 0;
+ #endif
++  result->type = type;
+   return result;
+ }
+ 
+diff --git a/src/span.h b/src/span.h
+index 502c169..2e67510 100644
+--- a/src/span.h
++++ b/src/span.h
+@@ -74,7 +74,7 @@ void Event(Span* span, char op, int v = 0);
+ #endif
+ 
+ // Allocator/deallocator for spans
+-Span* NewSpan(PageID p, Length len);
++Span* NewSpan(PageID p, Length len, TypeTag type);
+ void DeleteSpan(Span* span);
+ 
+ // -------------------------------------------------------------------------
+diff --git a/src/static_vars.cc b/src/static_vars.cc
+index 6eb2c80..4617797 100644
+--- a/src/static_vars.cc
++++ b/src/static_vars.cc
+@@ -54,15 +54,17 @@ namespace tcmalloc {
+ 
+ void CentralCacheLockAll()
+ {
++  // FIXME: broken for arena
+   Static::pageheap_lock()->Lock();
+   for (int i = 0; i < kNumClasses; ++i)
+-    Static::central_cache()[i].Lock();
++    Static::central_cache(0)[i].Lock();
+ }
+ 
+ void CentralCacheUnlockAll()
+ {
++  // FIXME: broken for arena
+   for (int i = 0; i < kNumClasses; ++i)
+-    Static::central_cache()[i].Unlock();
++    Static::central_cache(0)[i].Unlock();
+   Static::pageheap_lock()->Unlock();
+ }
+ #endif
+diff --git a/src/static_vars.h b/src/static_vars.h
+index 3c9f928..d28e561 100644
+--- a/src/static_vars.h
++++ b/src/static_vars.h
+@@ -57,7 +57,7 @@ class Static {
+ 
+   // Central cache -- an array of free-lists, one per size-class.
+   // We have a separate lock per free-list to reduce contention.
+-  static CentralFreeListPadded* central_cache(TypeTag type = 0);
++  static CentralFreeListPadded* central_cache(TypeTag type);
+ 
+   static SizeMap* sizemap() { return &sizemap_; }
+ 
+diff --git a/src/system-alloc.cc b/src/system-alloc.cc
+index 59cd03d..75d868f 100755
+--- a/src/system-alloc.cc
++++ b/src/system-alloc.cc
+@@ -56,6 +56,8 @@
+ #include "common.h"
+ #include "internal_logging.h"
+ 
++#include <sys/resource.h>
++
+ // On systems (like freebsd) that don't define MAP_ANONYMOUS, use the old
+ // form of the name instead.
+ #ifndef MAP_ANONYMOUS
+@@ -115,6 +117,7 @@ static size_t pagesize = 0;
+ 
+ // The current system allocator
+ SysAllocator* sys_alloc = NULL;
++SysAllocator* sys_alloc_arena = NULL;
+ 
+ // Number of bytes taken from system.
+ size_t TCMalloc_SystemTaken = 0;
+@@ -313,10 +316,30 @@ void* MmapSysAllocator::Alloc(size_t size, size_t *actual_size,
+   //            size + alignment < (1<<NBITS).
+   // and        extra <= alignment
+   // therefore  size + extra < (1<<NBITS)
++#if 0
+   void* result = mmap(NULL, size + extra,
+                       PROT_READ|PROT_WRITE,
+-                      MAP_PRIVATE|MAP_ANONYMOUS,
++                      MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,
++                      -1, 0);
++#else
++  // arena hack: try mapping near the start of memory?
++  void *result = reinterpret_cast<void*>(MAP_FAILED);
++  char *base = NULL;
++  int tryCnt = 0;
++  if (size > 1024*1024*1024ull)
++    base = (char *)(4*1024*1024*1024ull);
++  while (result == reinterpret_cast<void*>(MAP_FAILED)) {
++  result = mmap(base, size + extra,
++                      PROT_READ|PROT_WRITE,
++                      MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,
+                       -1, 0);
++  if (!base) break;
++  tryCnt++;
++  base += size;
++  if (tryCnt > 128)
++    return NULL;
++  }
++#endif
+   if (result == reinterpret_cast<void*>(MAP_FAILED)) {
+     return NULL;
+   }
+@@ -477,10 +500,18 @@ void InitSystemAllocators(void) {
+   }
+ 
+   sys_alloc = tc_get_sysalloc_override(sdef);
++
++  // arenas: we only allow mmap
++  sys_alloc_arena = mmap;
++  // also we need all the address space
++  struct rlimit rl; 
++  getrlimit (RLIMIT_AS, &rl);
++  rl.rlim_cur = rl.rlim_max;
++  setrlimit (RLIMIT_AS, &rl);
+ }
+ 
+ void* TCMalloc_SystemAlloc(size_t size, size_t *actual_size,
+-                           size_t alignment) {
++                           size_t alignment, bool isArena) {
+   // Discard requests that overflow
+   if (size + alignment < size) return NULL;
+ 
+@@ -499,7 +530,11 @@ void* TCMalloc_SystemAlloc(size_t size, size_t *actual_size,
+     actual_size = &actual_size_storage;
+   }
+ 
+-  void* result = sys_alloc->Alloc(size, actual_size, alignment);
++  void* result;
++  if (isArena)
++    result = sys_alloc_arena->Alloc(size, actual_size, alignment);
++  else // metadata etc
++    result = sys_alloc->Alloc(size, actual_size, alignment);
+   if (result != NULL) {
+     CHECK_CONDITION(
+       CheckAddressBits<kAddressBits>(
+diff --git a/src/system-alloc.h b/src/system-alloc.h
+index 8233f96..8884902 100644
+--- a/src/system-alloc.h
++++ b/src/system-alloc.h
+@@ -60,7 +60,7 @@ class SysAllocator;
+ // Returns NULL when out of memory.
+ extern PERFTOOLS_DLL_DECL
+ void* TCMalloc_SystemAlloc(size_t bytes, size_t *actual_bytes,
+-			   size_t alignment = 0);
++			   size_t alignment = 0, bool isArena = false);
+ 
+ // This call is a hint to the operating system that the pages
+ // contained in the specified range of memory will not be used for a
+diff --git a/src/tcmalloc.cc b/src/tcmalloc.cc
+index bd5eb93..28e7af8 100644
+--- a/src/tcmalloc.cc
++++ b/src/tcmalloc.cc
+@@ -316,9 +316,9 @@ static void ExtractStats(TCMallocStats* r, uint64_t* class_count,
+   r->central_bytes = 0;
+   r->transfer_bytes = 0;
+   for (int cl = 0; cl < kNumClasses; ++cl) {
+-    const int length = Static::central_cache()[cl].length();
+-    const int tc_length = Static::central_cache()[cl].tc_length();
+-    const size_t cache_overhead = Static::central_cache()[cl].OverheadBytes();
++    const int length = Static::central_cache(0)[cl].length();
++    const int tc_length = Static::central_cache(0)[cl].tc_length();
++    const size_t cache_overhead = Static::central_cache(0)[cl].OverheadBytes();
+     const size_t size = static_cast<uint64_t>(
+         Static::sizemap()->ByteSizeForClass(cl));
+     r->central_bytes += (size * length) + cache_overhead;
+@@ -759,6 +759,7 @@ class TCMallocImplementation : public MallocExtension {
+   }
+ 
+   virtual void ReleaseToSystem(size_t num_bytes) {
++#if 0
+     SpinLockHolder h(Static::pageheap_lock());
+     if (num_bytes <= extra_bytes_released_) {
+       // We released too much on a prior call, so don't release any
+@@ -781,6 +782,7 @@ class TCMallocImplementation : public MallocExtension {
+       // ReleaseFreeMemory() calls ReleaseToSystem(LONG_MAX).
+       extra_bytes_released_ = 0;
+     }
++#endif
+   }
+ 
+   virtual void SetMemoryReleaseRate(double rate) {
+@@ -843,13 +845,13 @@ class TCMallocImplementation : public MallocExtension {
+       i.min_object_size = prev_class_size + 1;
+       i.max_object_size = class_size;
+       i.total_bytes_free =
+-          Static::central_cache()[cl].length() * class_size;
++          Static::central_cache(0)[cl].length() * class_size;
+       i.type = kCentralCacheType;
+       v->push_back(i);
+ 
+       // transfer cache
+       i.total_bytes_free =
+-          Static::central_cache()[cl].tc_length() * class_size;
++          Static::central_cache(0)[cl].tc_length() * class_size;
+       i.type = kTransferCacheType;
+       v->push_back(i);
+ 
+@@ -988,7 +990,7 @@ static inline void* SpanToMallocResult(Span *span) {
+       CheckedMallocResult(reinterpret_cast<void*>(span->start << kPageShift));
+ }
+ 
+-static void* DoSampledAllocation(size_t size) {
++static void* DoSampledAllocation(size_t size, TypeTag type) {
+ #ifndef NO_TCMALLOC_SAMPLES
+   // Grab the stack trace outside the heap lock
+   StackTrace tmp;
+@@ -997,7 +999,7 @@ static void* DoSampledAllocation(size_t size) {
+ 
+   SpinLockHolder h(Static::pageheap_lock());
+   // Allocate span
+-  Span *span = Static::pageheap()->New(tcmalloc::pages(size == 0 ? 1 : size));
++  Span *span = Static::pageheap()->New(tcmalloc::pages(size == 0 ? 1 : size), type);
+   if (UNLIKELY(span == NULL)) {
+     return NULL;
+   }
+@@ -1108,32 +1110,34 @@ static void ReportLargeAlloc(Length num_pages, void* result) {
+   write(STDERR_FILENO, buffer, strlen(buffer));
+ }
+ 
+-void* do_memalign(size_t align, size_t size);
++void* do_memalign(size_t align, size_t size, TypeTag type);
+ 
+ struct retry_memaligh_data {
+   size_t align;
+   size_t size;
++  TypeTag type;
+ };
+ 
+ static void *retry_do_memalign(void *arg) {
+   retry_memaligh_data *data = static_cast<retry_memaligh_data *>(arg);
+-  return do_memalign(data->align, data->size);
++  return do_memalign(data->align, data->size, data->type);
+ }
+ 
+-static void *maybe_do_cpp_memalign_slow(size_t align, size_t size) {
++static void *maybe_do_cpp_memalign_slow(size_t align, size_t size, TypeTag type) {
+   retry_memaligh_data data;
+   data.align = align;
+   data.size = size;
++  data.type = type;
+   return handle_oom(retry_do_memalign, &data,
+                     false, true);
+ }
+ 
+-inline void* do_memalign_or_cpp_memalign(size_t align, size_t size) {
+-  void *rv = do_memalign(align, size);
++inline void* do_memalign_or_cpp_memalign(size_t align, size_t size, TypeTag type) {
++  void *rv = do_memalign(align, size, type);
+   if (LIKELY(rv != NULL)) {
+     return rv;
+   }
+-  return maybe_do_cpp_memalign_slow(align, size);
++  return maybe_do_cpp_memalign_slow(align, size, type);
+ }
+ 
+ // Must be called with the page lock held.
+@@ -1164,13 +1168,13 @@ inline void* do_malloc_pages(ThreadCache* heap, size_t size, TypeTag type = 0) {
+   //
+   // See https://github.com/gperftools/gperftools/issues/723
+   if (UNLIKELY(!type && heap->SampleAllocation(size))) {
+-    result = DoSampledAllocation(size);
++    result = DoSampledAllocation(size, type);
+ 
+     SpinLockHolder h(Static::pageheap_lock());
+     report_large = should_report_large(num_pages);
+   } else {
+     SpinLockHolder h(Static::pageheap_lock());
+-    Span* span = Static::pageheap()->New(num_pages);
++    Span* span = Static::pageheap()->New(num_pages, type);
+     result = (UNLIKELY(span == NULL) ? NULL : SpanToMallocResult(span));
+     report_large = should_report_large(num_pages);
+   }
+@@ -1189,7 +1193,7 @@ ALWAYS_INLINE void* do_malloc_small(ThreadCache* heap, size_t size, TypeTag type
+ 
+   // TODO(chris): Implement types for Sampled Allocations
+   if (UNLIKELY(!type && heap->SampleAllocation(size))) {
+-    return DoSampledAllocation(size);
++    return DoSampledAllocation(size, type);
+   } else {
+     // The common case, and also the simplest.  This just pops the
+     // size-appropriate freelist, after replenishing it if it's empty.
+@@ -1318,6 +1322,7 @@ ALWAYS_INLINE void do_free_helper(void* ptr,
+     } else {
+       // Delete directly into central cache
+       tcmalloc::SLL_SetNext(ptr, NULL);
++      /* alyssa says: CHECK THIS */
+       Static::central_cache(span->type)[cl].InsertRange(ptr, ptr, 1);
+     }
+   } else {
+@@ -1360,10 +1365,14 @@ ALWAYS_INLINE void do_free(void* ptr) {
+ // NOTE: some logic here is duplicated in GetOwnership (above), for
+ // speed.  If you change this function, look at that one too.
+ inline size_t GetSizeWithCallback(const void* ptr,
+-                                  size_t (*invalid_getsize_fn)(const void*)) {
++                                  size_t (*invalid_getsize_fn)(const void*), TypeTag *type) {
+   if (ptr == NULL)
+     return 0;
+   const PageID p = reinterpret_cast<uintptr_t>(ptr) >> kPageShift;
++
++  const Span *span = Static::pageheap()->GetDescriptor(p);
++  if (span && type) *type = span->type;
++
+   size_t cl = Static::pageheap()->GetSizeClassIfCached(p);
+   if (cl != 0) {
+     return Static::sizemap()->ByteSizeForClass(cl);
+@@ -1388,7 +1397,7 @@ ALWAYS_INLINE void* do_realloc_with_callback(
+     size_t (*invalid_get_size_fn)(const void*),
+     TypeTag type) {
+   // Get the size of the old entry
+-  const size_t old_size = GetSizeWithCallback(old_ptr, invalid_get_size_fn);
++  const size_t old_size = GetSizeWithCallback(old_ptr, invalid_get_size_fn, &type);
+ 
+   // Reallocate if the new size is larger than the old size,
+   // or if the new size is significantly smaller than the old size.
+@@ -1445,14 +1454,14 @@ ALWAYS_INLINE void* do_realloc(void* old_ptr, size_t new_size) {
+ // memalign/posix_memalign/valloc/pvalloc will not be invoked very
+ // often.  This requirement simplifies our implementation and allows
+ // us to tune for expected allocation patterns.
+-void* do_memalign(size_t align, size_t size) {
++void* do_memalign(size_t align, size_t size, TypeTag type) {
+   ASSERT((align & (align - 1)) == 0);
+   ASSERT(align > 0);
+   if (size + align < size) return NULL;         // Overflow
+ 
+   // Fall back to malloc if we would already align this memory access properly.
+   if (align <= AlignmentForSize(size)) {
+-    void* p = do_malloc(size);
++    void* p = do_typed_malloc(size, type);
+     ASSERT((reinterpret_cast<uintptr_t>(p) % align) == 0);
+     return p;
+   }
+@@ -1477,7 +1486,7 @@ void* do_memalign(size_t align, size_t size) {
+     if (cl < kNumClasses) {
+       ThreadCache* heap = ThreadCache::GetCache();
+       size = Static::sizemap()->class_to_size(cl);
+-      return CheckedMallocResult(heap->Allocate(size, cl));
++      return CheckedMallocResult(heap->Allocate(size, cl, type));
+     }
+   }
+ 
+@@ -1488,13 +1497,13 @@ void* do_memalign(size_t align, size_t size) {
+     // Any page-level allocation will be fine
+     // TODO: We could put the rest of this page in the appropriate
+     // TODO: cache but it does not seem worth it.
+-    Span* span = Static::pageheap()->New(tcmalloc::pages(size));
++    Span* span = Static::pageheap()->New(tcmalloc::pages(size), type);
+     return UNLIKELY(span == NULL) ? NULL : SpanToMallocResult(span);
+   }
+ 
+   // Allocate extra pages and carve off an aligned portion
+   const Length alloc = tcmalloc::pages(size + align);
+-  Span* span = Static::pageheap()->New(alloc);
++  Span* span = Static::pageheap()->New(alloc, type);
+   if (UNLIKELY(span == NULL)) return NULL;
+ 
+   // Skip starting portion so that we end up aligned
+@@ -1578,7 +1587,7 @@ size_t TCMallocImplementation::GetAllocatedSize(const void* ptr) {
+     return 0;
+   ASSERT(TCMallocImplementation::GetOwnership(ptr)
+          != TCMallocImplementation::kNotOwned);
+-  return GetSizeWithCallback(ptr, &InvalidGetAllocatedSize);
++  return GetSizeWithCallback(ptr, &InvalidGetAllocatedSize, NULL);
+ }
+ 
+ void TCMallocImplementation::MarkThreadBusy() {
+@@ -1840,7 +1849,14 @@ TC_ALIAS(tc_free);
+ 
+ extern "C" PERFTOOLS_DLL_DECL void* tc_memalign(size_t align,
+                                                 size_t size) PERFTOOLS_THROW {
+-  void* result = do_memalign_or_cpp_memalign(align, size);
++  void* result = do_memalign_or_cpp_memalign(align, size, 0);
++  MallocHook::InvokeNewHook(result, size);
++  return result;
++}
++
++extern "C" PERFTOOLS_DLL_DECL void* tc_typed_memalign(size_t align,
++                                                size_t size, TypeTag type) PERFTOOLS_THROW {
++  void* result = do_memalign_or_cpp_memalign(align, size, type);
+   MallocHook::InvokeNewHook(result, size);
+   return result;
+ }
+@@ -1853,7 +1869,25 @@ extern "C" PERFTOOLS_DLL_DECL int tc_posix_memalign(
+     return EINVAL;
+   }
+ 
+-  void* result = do_memalign_or_cpp_memalign(align, size);
++  void* result = do_memalign_or_cpp_memalign(align, size, 0); // untyped
++  MallocHook::InvokeNewHook(result, size);
++  if (UNLIKELY(result == NULL)) {
++    return ENOMEM;
++  } else {
++    *result_ptr = result;
++    return 0;
++  }
++}
++
++extern "C" PERFTOOLS_DLL_DECL int tc_typed_posix_memalign(
++    void** result_ptr, size_t align, size_t size, TypeTag type) PERFTOOLS_THROW {
++  if (((align % sizeof(void*)) != 0) ||
++      ((align & (align - 1)) != 0) ||
++      (align == 0)) {
++    return EINVAL;
++  }
++
++  void* result = do_memalign_or_cpp_memalign(align, size, type);
+   MallocHook::InvokeNewHook(result, size);
+   if (UNLIKELY(result == NULL)) {
+     return ENOMEM;
+@@ -1868,7 +1902,15 @@ static size_t pagesize = 0;
+ extern "C" PERFTOOLS_DLL_DECL void* tc_valloc(size_t size) PERFTOOLS_THROW {
+   // Allocate page-aligned object of length >= size bytes
+   if (pagesize == 0) pagesize = getpagesize();
+-  void* result = do_memalign_or_cpp_memalign(pagesize, size);
++  void* result = do_memalign_or_cpp_memalign(pagesize, size, 0);
++  MallocHook::InvokeNewHook(result, size);
++  return result;
++}
++
++extern "C" PERFTOOLS_DLL_DECL void* tc_typed_valloc(size_t size, TypeTag type) PERFTOOLS_THROW {
++  // Allocate page-aligned object of length >= size bytes
++  if (pagesize == 0) pagesize = getpagesize();
++  void* result = do_memalign_or_cpp_memalign(pagesize, size, type);
+   MallocHook::InvokeNewHook(result, size);
+   return result;
+ }
+@@ -1880,7 +1922,19 @@ extern "C" PERFTOOLS_DLL_DECL void* tc_pvalloc(size_t size) PERFTOOLS_THROW {
+     size = pagesize;   // http://man.free4web.biz/man3/libmpatrol.3.html
+   }
+   size = (size + pagesize - 1) & ~(pagesize - 1);
+-  void* result = do_memalign_or_cpp_memalign(pagesize, size);
++  void* result = do_memalign_or_cpp_memalign(pagesize, size, 0);
++  MallocHook::InvokeNewHook(result, size);
++  return result;
++}
++
++extern "C" PERFTOOLS_DLL_DECL void* tc_typed_pvalloc(size_t size, TypeTag type) PERFTOOLS_THROW {
++  // Round up size to a multiple of pagesize
++  if (pagesize == 0) pagesize = getpagesize();
++  if (size == 0) {     // pvalloc(0) should allocate one page, according to
++    size = pagesize;   // http://man.free4web.biz/man3/libmpatrol.3.html
++  }
++  size = (size + pagesize - 1) & ~(pagesize - 1);
++  void* result = do_memalign_or_cpp_memalign(pagesize, size, type);
+   MallocHook::InvokeNewHook(result, size);
+   return result;
+ }
+diff --git a/src/tests/page_heap_test.cc b/src/tests/page_heap_test.cc
+index e82a1da..6b0099e 100644
+--- a/src/tests/page_heap_test.cc
++++ b/src/tests/page_heap_test.cc
+@@ -54,7 +54,7 @@ static void TestPageHeap_Stats() {
+   CheckStats(ph, 256, 128, 0);
+ 
+   // Unmap deleted span 's2'
+-  ph->ReleaseAtLeastNPages(1);
++  ph->ReleaseAtLeastNPages(1, 0);
+   CheckStats(ph, 256, 0, 128);
+ 
+   // Delete span 's1'
+diff --git a/src/tests/testutil.cc b/src/tests/testutil.cc
+index c2c71cb..33d863d 100644
+--- a/src/tests/testutil.cc
++++ b/src/tests/testutil.cc
+@@ -65,13 +65,14 @@ void SetTestResourceLimit() {
+   // 32-bit and 64-bit hosts, and executes in ~1s.
+   const rlim_t kMaxMem = 1<<30;
+ 
+-  struct rlimit rlim;
++  // NO WHAT NEVER - alyssa
++/*  struct rlimit rlim;
+   if (getrlimit(USE_RESOURCE, &rlim) == 0) {
+     if (rlim.rlim_cur == RLIM_INFINITY || rlim.rlim_cur > kMaxMem) {
+       rlim.rlim_cur = kMaxMem;
+       setrlimit(USE_RESOURCE, &rlim); // ignore result
+     }
+-  }
++  }*/
+ #endif  /* HAVE_SYS_RESOURCE_H */
+ }
+ 
+diff --git a/src/thread_cache.cc b/src/thread_cache.cc
+index 0c26397..6536b00 100644
+--- a/src/thread_cache.cc
++++ b/src/thread_cache.cc
+@@ -138,7 +138,7 @@ ThreadCache::FetchFromCentralCache(size_t cl, size_t byte_size, TypeTag type) {
+   ASSERT((start == NULL) == (fetch_count == 0));
+ 
+   // Set type for allocated span.
+-  if (UNLIKELY(type)) {
++  if (UNLIKELY(type) && (start != NULL)) {
+     const PageID p = reinterpret_cast<uintptr_t>(start) >> kPageShift;
+     Span *span = Static::pageheap()->GetDescriptor(p);
+ 
+@@ -203,9 +203,12 @@ void ThreadCache::ListTooLong(FreeList* list, size_t cl, TypeTag type) {
+ void ThreadCache::ReleaseToCentralCache(FreeList* src, size_t cl, int N, TypeTag type) {
+   ASSERT(src == GetTypedFreeList(cl, type, false /* canCreate */));
+ 
++#ifdef MISALIGNED_TEMPORAL_SAFETY
++  /* this leads to thrashing and leaks, so I sabotaged it - alyssa */
+   if (type && kPageSize % Static::sizemap()->ByteSizeForClass(cl) != 0) {
+     return;                     // Page size must be a multiple of byte size
+   }
++#endif
+ 
+   if (N > src->length()) N = src->length();
+   size_t delta_bytes = N * Static::sizemap()->ByteSizeForClass(cl);
+diff --git a/src/thread_cache.h b/src/thread_cache.h
+index c461133..31fda87 100644
+--- a/src/thread_cache.h
++++ b/src/thread_cache.h
+@@ -97,7 +97,8 @@ class ThreadCache {
+   }
+ 
+   // Total byte size in cache
+-  size_t Size(TypeTag type = 0) const { return typed_freelist_map_.get(type)->size_; }
++  //size_t Size(TypeTag type = 0) const { return typed_freelist_map_.get(type)->size_; }
++  size_t Size(TypeTag type = 0) const { if (!type) return 0; return typed_freelist_map_.get(type)->size_; } // FIXME alyssa hack (this is now a mess to impl :/)
+ 
+   // Allocate an object of the given size and class. The size given
+   // must be the same as the size of the class in the size map.

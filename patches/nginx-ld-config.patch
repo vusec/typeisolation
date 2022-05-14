@@ -1,0 +1,59 @@
+diff -ru a/auto/cc/conf b/auto/cc/conf
+--- a/auto/cc/conf	2020-04-21 14:09:01.000000000 +0000
++++ b/auto/cc/conf	2021-03-11 02:34:12.284074500 +0000
+@@ -143,6 +143,8 @@
+ 
+ CFLAGS="$CFLAGS $NGX_CC_OPT"
+ NGX_TEST_LD_OPT="$NGX_LD_OPT"
++NGX_TEST_LD_BEGIN="$NGX_LD_BEGIN"
++NGX_TEST_LD_END="$NGX_LD_END"
+ 
+ if [ "$NGX_PLATFORM" != win32 ]; then
+ 
+diff -ru a/auto/feature b/auto/feature
+--- a/auto/feature	2020-04-21 14:09:01.000000000 +0000
++++ b/auto/feature	2021-03-11 02:34:12.284074500 +0000
+@@ -40,7 +40,7 @@
+ 
+ 
+ ngx_test="$CC $CC_TEST_FLAGS $CC_AUX_FLAGS $ngx_feature_inc_path \
+-          -o $NGX_AUTOTEST $NGX_AUTOTEST.c $NGX_TEST_LD_OPT $ngx_feature_libs"
++          $NGX_TEST_LD_BEGIN -o $NGX_AUTOTEST $NGX_AUTOTEST.c $NGX_TEST_LD_OPT $ngx_feature_libs $NGX_TEST_LD_END"
+ 
+ ngx_feature_inc_path=
+ 
+diff -ru a/auto/make b/auto/make
+--- a/auto/make	2020-04-21 14:09:01.000000000 +0000
++++ b/auto/make	2021-03-11 02:34:12.284074500 +0000
+@@ -213,6 +213,10 @@
+ if test -n "$NGX_LD_OPT$CORE_LIBS"; then
+     ngx_libs=`echo $NGX_LD_OPT $CORE_LIBS \
+         | sed -e "s/\//$ngx_regex_dirsep/g" -e "s/^/$ngx_long_regex_cont/"`
++    ngx_link_begin=`echo $NGX_LD_BEGIN \
++        | sed -e "s/\//$ngx_regex_dirsep/g" -e "s/^/$ngx_long_regex_cont/"`
++    ngx_link_end=`echo $NGX_LD_END \
++        | sed -e "s/\//$ngx_regex_dirsep/g" -e "s/^/$ngx_long_regex_cont/"`
+ fi
+ 
+ ngx_link=${CORE_LINK:+`echo $CORE_LINK \
+@@ -229,7 +233,7 @@
+ binary:	$NGX_OBJS${ngx_dirsep}nginx$ngx_binext
+ 
+ $NGX_OBJS${ngx_dirsep}nginx$ngx_binext:	$ngx_deps$ngx_spacer
+-	\$(LINK) $ngx_long_start$ngx_binout$NGX_OBJS${ngx_dirsep}nginx$ngx_binext$ngx_long_cont$ngx_objs$ngx_libs$ngx_link$ngx_main_link
++	\$(LINK) $ngx_link_begin $ngx_long_start$ngx_binout$NGX_OBJS${ngx_dirsep}nginx$ngx_binext$ngx_long_cont$ngx_objs$ngx_libs$ngx_link$ngx_main_link $ngx_link_end
+ 	$ngx_rcc
+ $ngx_long_end
+ 
+diff -ru a/auto/options b/auto/options
+--- a/auto/options	2020-04-21 14:09:01.000000000 +0000
++++ b/auto/options	2021-03-11 02:34:12.284074500 +0000
+@@ -345,6 +345,8 @@
+         --with-cpp=*)                    CPP="$value"               ;;
+         --with-cc-opt=*)                 NGX_CC_OPT="$value"        ;;
+         --with-ld-opt=*)                 NGX_LD_OPT="$value"        ;;
++        --with-ld-begin=*)               NGX_LD_BEGIN="$value"      ;;
++        --with-ld-end=*)                 NGX_LD_END="$value"        ;;
+         --with-cpu-opt=*)                CPU="$value"               ;;
+         --with-debug)                    NGX_DEBUG=YES              ;;
+ 

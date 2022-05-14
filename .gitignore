@@ -1,0 +1,6 @@
+*~
+*.swp
+gperftools/*
+/autosetup.dir/
+/autosetup.tmp/
+obj/

@@ -1,0 +1,144 @@
+Index: lib/LTO/LTOBackend.cpp
+===================================================================
+--- lib/LTO/LTOBackend.cpp	(revision 375507)
++++ lib/LTO/LTOBackend.cpp	(working copy)
+@@ -20,7 +20,9 @@
+ #include "llvm/Analysis/TargetTransformInfo.h"
+ #include "llvm/Bitcode/BitcodeReader.h"
+ #include "llvm/Bitcode/BitcodeWriter.h"
++#include "llvm/Bitcode/BitcodeWriterPass.h"
+ #include "llvm/IR/LegacyPassManager.h"
++#include "llvm/IR/LegacyPassNameParser.h"
+ #include "llvm/IR/PassManager.h"
+ #include "llvm/IR/RemarkStreamer.h"
+ #include "llvm/IR/Verifier.h"
+@@ -30,11 +32,13 @@
+ #include "llvm/Passes/PassBuilder.h"
+ #include "llvm/Support/Error.h"
+ #include "llvm/Support/FileSystem.h"
++#include "llvm/Support/PluginLoader.h"
+ #include "llvm/Support/MemoryBuffer.h"
+ #include "llvm/Support/Path.h"
+ #include "llvm/Support/Program.h"
+ #include "llvm/Support/TargetRegistry.h"
+ #include "llvm/Support/ThreadPool.h"
++#include "llvm/Support/ToolOutputFile.h"
+ #include "llvm/Support/raw_ostream.h"
+ #include "llvm/Target/TargetMachine.h"
+ #include "llvm/Transforms/IPO.h"
+@@ -52,6 +56,23 @@
+   exit(1);
+ }
+ 
++static cl::list<const PassInfo*, bool, PassNameParser>
++PassList(cl::desc("Optimizations available:"));
++
++static cl::opt<bool>
++DisableOpt("disable-opt", cl::init(false),
++  cl::desc("Do not run any optimization passes"));
++
++static cl::opt<bool>
++DisableInlining("disable-inlining", cl::init(false),
++  cl::desc("Do not run any inlining passes"));
++
++static cl::opt<std::string>
++LLOutputFilename("llo", cl::init(""), cl::desc("Output IR filename"),
++               cl::value_desc("filename"));
++
++
++
+ Error Config::addSaveTemps(std::string OutputFileName,
+                            bool UseInputModulePath) {
+   ShouldDiscardValueNames = false;
+@@ -270,7 +291,12 @@
+ 
+   PassManagerBuilder PMB;
+   PMB.LibraryInfo = new TargetLibraryInfoImpl(Triple(TM->getTargetTriple()));
+-  PMB.Inliner = createFunctionInliningPass();
++  if (DisableInlining) {
++    PMB.Inliner = NULL;
++  }
++  else
++    PMB.Inliner = createFunctionInliningPass();
++
+   PMB.ExportSummary = ExportSummary;
+   PMB.ImportSummary = ImportSummary;
+   // Unconditionally verify input since it is not verified before this
+@@ -280,6 +306,8 @@
+   PMB.LoopVectorize = true;
+   PMB.SLPVectorize = true;
+   PMB.OptLevel = Conf.OptLevel;
++  if (DisableOpt)
++    PMB.OptLevel = 0;
+   PMB.PGOSampleUse = Conf.SampleProfile;
+   PMB.EnablePGOCSInstrGen = Conf.RunCSIRInstr;
+   if (!Conf.RunCSIRInstr && !Conf.CSIRProfile.empty()) {
+@@ -290,7 +318,46 @@
+     PMB.populateThinLTOPassManager(passes);
+   else
+     PMB.populateLTOPassManager(passes);
++
++  for (unsigned i = 0; i < PassList.size(); ++i) {
++    const PassInfo *PassInf = PassList[i];
++    Pass *P = nullptr;
++//  if (PassInf->getTargetMachineCtor())
++//    P = PassInf->getTargetMachineCtor()(TM);
++    if (PassInf->getNormalCtor())
++      P = PassInf->getNormalCtor()();
++    else
++      errs() << "LLVMgold: cannot create pass: "
++             << PassInf->getPassName() << "\n";
++    if (P) {
++      passes.add(P);
++      passes.add(createVerifierPass());
++    }
++  }
++
++  if (PassList.size() != 0)
++    if (IsThinLTO)
++    PMB.populateThinLTOPassManager(passes);
++  else
++    PMB.populateLTOPassManager(passes);
++
++  std::unique_ptr<ToolOutputFile> Out;
++  if (LLOutputFilename != "") {
++    std::error_code EC;
++    Out.reset(
++      new ToolOutputFile(LLOutputFilename, EC, sys::fs::F_None));
++    if (EC) {
++      errs() << EC.message() << '\n';
++      return;
++    }
++    passes.add(createBitcodeWriterPass(Out->os()));
++  }
++
+   passes.run(Mod);
++
++  if (LLOutputFilename != "") {
++    Out->keep();
++  }
+ }
+ 
+ bool opt(Config &Conf, TargetMachine *TM, unsigned Task, Module &Mod,
+Index: lib/LTO/LTOCodeGenerator.cpp
+===================================================================
+--- lib/LTO/LTOCodeGenerator.cpp	(revision 375507)
++++ lib/LTO/LTOCodeGenerator.cpp	(working copy)
+@@ -519,6 +519,7 @@
+ bool LTOCodeGenerator::optimize(bool DisableVerify, bool DisableInline,
+                                 bool DisableGVNLoadPRE,
+                                 bool DisableVectorization) {
++#include "llvm/Support/ToolOutputFile.h"
+   if (!this->determineTarget())
+     return false;
+ 
+Index: tools/gold/CMakeLists.txt
+===================================================================
+--- tools/gold/CMakeLists.txt	(revision 375507)
++++ tools/gold/CMakeLists.txt	(working copy)
+@@ -1,4 +1,4 @@
+-set(LLVM_EXPORTED_SYMBOL_FILE ${CMAKE_CURRENT_SOURCE_DIR}/gold.exports)
++#set(LLVM_EXPORTED_SYMBOL_FILE ${CMAKE_CURRENT_SOURCE_DIR}/gold.exports)
+ 
+ if( LLVM_ENABLE_PIC AND LLVM_BINUTILS_INCDIR )
+   include_directories( ${LLVM_BINUTILS_INCDIR} )

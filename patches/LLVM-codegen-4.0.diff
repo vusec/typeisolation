@@ -1,0 +1,13 @@
+Index: include/llvm/CodeGen/SelectionDAGNodes.h
+===================================================================
+--- include/llvm/CodeGen/SelectionDAGNodes.h	(revision 305638)
++++ include/llvm/CodeGen/SelectionDAGNodes.h	(working copy)
+@@ -507,7 +507,7 @@
+   SDUse *UseList;
+ 
+   /// The number of entries in the Operand/Value list.
+-  unsigned short NumOperands, NumValues;
++  unsigned NumOperands, NumValues;
+ 
+   // The ordering of the SDNodes. It roughly corresponds to the ordering of the
+   // original LLVM instructions.

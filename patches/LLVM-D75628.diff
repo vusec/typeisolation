@@ -1,0 +1,242 @@
+diff --git a/llvm/include/llvm/Analysis/ScalarEvolution.h b/llvm/include/llvm/Analysis/ScalarEvolution.h
+--- a/llvm/include/llvm/Analysis/ScalarEvolution.h
++++ b/llvm/include/llvm/Analysis/ScalarEvolution.h
+@@ -1100,6 +1100,11 @@
+       const SCEV *S, const Loop *L,
+       SmallPtrSetImpl<const SCEVPredicate *> &Preds);
+ 
++  /// Examines the list of SCEV expressions to find all their used loops and
++  /// returns true if a total ordering relationship based on dominance can be
++  /// applied to that set of loops found. Returns false otherwise.
++  bool satisfiesTotalOrder(ArrayRef<const SCEV *> Exprs) const;
++
+ private:
+   /// A CallbackVH to arrange for ScalarEvolution to be notified whenever a
+   /// Value is deleted.
+@@ -1882,7 +1887,8 @@
+   /// Find all of the loops transitively used in \p S, and fill \p LoopsUsed.
+   /// A loop is considered "used" by an expression if it contains
+   /// an add rec on said loop.
+-  void getUsedLoops(const SCEV *S, SmallPtrSetImpl<const Loop *> &LoopsUsed);
++  void getUsedLoops(const SCEV *S,
++                    SmallPtrSetImpl<const Loop *> &LoopsUsed) const;
+ 
+   /// Find all of the loops transitively used in \p S, and update \c LoopUsers
+   /// accordingly.
+diff --git a/llvm/lib/Analysis/DependenceAnalysis.cpp b/llvm/lib/Analysis/DependenceAnalysis.cpp
+--- a/llvm/lib/Analysis/DependenceAnalysis.cpp
++++ b/llvm/lib/Analysis/DependenceAnalysis.cpp
+@@ -2709,10 +2709,31 @@
+     return exploreDirections(Level + 1, A, B, Bound, Loops, DepthExpanded, Delta);
+ }
+ 
+-
+ // Returns true iff the current bounds are plausible.
+ bool DependenceInfo::testBounds(unsigned char DirKind, unsigned Level,
+                                 BoundInfo *Bound, const SCEV *Delta) const {
++  // Check to see if the set of loops referenced by the bounds satisfy a total
++  // order. If not, SCEV cannot compute the bounds.
++  SmallVector<const SCEV *, 8> BoundExprs;
++  for (unsigned K = 1; K <= MaxLevels; ++K) {
++    const SCEV *LB = Bound[K].Lower[Bound[K].Direction];
++    if (LB)
++      BoundExprs.push_back(LB);
++  }
++  BoundExprs.push_back(Delta);
++  if (!SE->satisfiesTotalOrder(BoundExprs))
++    return true;
++  BoundExprs.clear();
++  for (unsigned K = 1; K <= MaxLevels; ++K) {
++    const SCEV *UB = Bound[K].Upper[Bound[K].Direction];
++    if (UB)
++      BoundExprs.push_back(UB);
++  }
++  BoundExprs.push_back(Delta);
++  if (!SE->satisfiesTotalOrder(BoundExprs))
++    return true;
++  BoundExprs.clear();
++
+   Bound[Level].Direction = DirKind;
+   if (const SCEV *LowerBound = getLowerBound(Bound))
+     if (isKnownPredicate(CmpInst::ICMP_SGT, LowerBound, Delta))
+@@ -2723,7 +2744,6 @@
+   return true;
+ }
+ 
+-
+ // Computes the upper and lower bounds for level K
+ // using the * direction. Records them in Bound.
+ // Wolfe gives the equations
+diff --git a/llvm/lib/Analysis/ScalarEvolution.cpp b/llvm/lib/Analysis/ScalarEvolution.cpp
+--- a/llvm/lib/Analysis/ScalarEvolution.cpp
++++ b/llvm/lib/Analysis/ScalarEvolution.cpp
+@@ -11995,9 +11995,8 @@
+   RemoveSCEVFromBackedgeMap(PredicatedBackedgeTakenCounts);
+ }
+ 
+-void
+-ScalarEvolution::getUsedLoops(const SCEV *S,
+-                              SmallPtrSetImpl<const Loop *> &LoopsUsed) {
++void ScalarEvolution::getUsedLoops(
++    const SCEV *S, SmallPtrSetImpl<const Loop *> &LoopsUsed) const {
+   struct FindUsedLoops {
+     FindUsedLoops(SmallPtrSetImpl<const Loop *> &LoopsUsed)
+         : LoopsUsed(LoopsUsed) {}
+@@ -12349,6 +12348,30 @@
+   return AddRec;
+ }
+ 
++bool ScalarEvolution::satisfiesTotalOrder(ArrayRef<const SCEV *> Exprs) const {
++  SmallPtrSet<const Loop *, 16> Loops;
++  for (const SCEV *E : Exprs)
++    getUsedLoops(E, Loops);
++  if (Loops.size() < 2)
++    return true;
++  // Copy to a container that can be sorted.
++  SmallVector<const Loop *, 16> SortedLoops;
++  SortedLoops.assign(Loops.begin(), Loops.end());
++  Loops.clear();
++  std::sort(SortedLoops.begin(), SortedLoops.end(),
++            [this](const Loop *LHS, const Loop *RHS) {
++              return this->DT.properlyDominates(LHS->getHeader(),
++                                                RHS->getHeader());
++            });
++  // Now that the set is sorted, we can detect in O(n) that total order is
++  // satisfied iff every element is larger than the next element.
++  for (int I = 1, E = SortedLoops.size(); I < E; ++I)
++    if (!DT.dominates(SortedLoops[I - 1]->getHeader(),
++                      SortedLoops[I]->getHeader()))
++      return false;
++  return true;
++}
++
+ /// SCEV predicates
+ SCEVPredicate::SCEVPredicate(const FoldingSetNodeIDRef ID,
+                              SCEVPredicateKind Kind)
+diff --git a/llvm/test/Analysis/DependenceAnalysis/SiblingLoopLimitation.ll b/llvm/test/Analysis/DependenceAnalysis/SiblingLoopLimitation.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/Analysis/DependenceAnalysis/SiblingLoopLimitation.ll
+@@ -0,0 +1,121 @@
++; RUN: opt < %s -disable-output -passes="print<da>" 2>&1 | FileCheck %s
++
++; CHECK-LABEL: foo
++; CHECK-LABEL: Src:  store i32 11, i32* %arrayidx, align 4 --> Dst:  store i32 22, i32* %arrayidx22, align 4
++; CHECK-NEXT:  da analyze - output [S|<]!
++
++;;void foo(int *restrict A, int n1, int n2, int n3) {
++;;  for (int i1 = 0; i1 < n1; i1++) {
++;;    for (int i2 = 2; i2 < n2; i2++) {
++;;      for (int i3 = i2 + 1; i3 < n3; i3++) {
++;;        A[i2 + i3*n2] = 11;
++;;      }
++;;    }
++;;    for (int i4 = 2; i4 < n3; i4++) {
++;;      for (int i5 = 1; i5 < i4 - 1; i5++) {
++;;        A[i5] = 22;
++;;      }
++;;    }
++;;  }
++;;}
++
++define void @foo(i32* noalias %A, i32 signext %n1, i32 signext %n2, i32 signext %n3) {
++entry:
++  %cmp9 = icmp sgt i32 %n1, 0
++  br i1 %cmp9, label %for.body.preheader, label %for.end31
++
++for.body.preheader:                               ; preds = %entry
++  %0 = sext i32 %n2 to i64
++  %1 = sext i32 %n3 to i64
++  %2 = add i32 %n3, -1
++  br label %for.body
++
++for.body:                                         ; preds = %for.body.preheader, %for.inc29
++  %i1.010 = phi i32 [ %inc30, %for.inc29 ], [ 0, %for.body.preheader ]
++  %cmp23 = icmp sgt i32 %n2, 2
++  br i1 %cmp23, label %for.body4.preheader, label %for.end12
++
++for.body4.preheader:                              ; preds = %for.body
++  %wide.trip.count17 = zext i32 %n2 to i64
++  br label %for.body4
++
++for.body4:                                        ; preds = %for.body4.preheader, %for.inc10
++  %indvars.iv15 = phi i64 [ 2, %for.body4.preheader ], [ %indvars.iv.next16, %for.inc10 ]
++  %indvars.iv = phi i64 [ 3, %for.body4.preheader ], [ %indvars.iv.next, %for.inc10 ]
++  %indvars.iv.next16 = add nuw nsw i64 %indvars.iv15, 1
++  %cmp61 = icmp slt i64 %indvars.iv.next16, %1
++  br i1 %cmp61, label %for.body8.preheader, label %for.inc10
++
++for.body8.preheader:                              ; preds = %for.body4
++  %wide.trip.count = zext i32 %n3 to i64
++  br label %for.body8
++
++for.body8:                                        ; preds = %for.body8.preheader, %for.body8
++  %indvars.iv11 = phi i64 [ %indvars.iv, %for.body8.preheader ], [ %indvars.iv.next12, %for.body8 ]
++  %3 = mul nsw i64 %indvars.iv11, %0
++  %4 = add nsw i64 %indvars.iv15, %3
++  %arrayidx = getelementptr inbounds i32, i32* %A, i64 %4
++  store i32 11, i32* %arrayidx, align 4
++  %indvars.iv.next12 = add nuw nsw i64 %indvars.iv11, 1
++  %exitcond = icmp ne i64 %indvars.iv.next12, %wide.trip.count
++  br i1 %exitcond, label %for.body8, label %for.inc10.loopexit
++
++for.inc10.loopexit:                               ; preds = %for.body8
++  br label %for.inc10
++
++for.inc10:                                        ; preds = %for.inc10.loopexit, %for.body4
++  %indvars.iv.next = add nuw nsw i64 %indvars.iv, 1
++  %exitcond18 = icmp ne i64 %indvars.iv.next16, %wide.trip.count17
++  br i1 %exitcond18, label %for.body4, label %for.end12.loopexit
++
++for.end12.loopexit:                               ; preds = %for.inc10
++  br label %for.end12
++
++for.end12:                                        ; preds = %for.end12.loopexit, %for.body
++  %cmp147 = icmp sgt i32 %n3, 2
++  br i1 %cmp147, label %for.body16.preheader, label %for.inc29
++
++for.body16.preheader:                             ; preds = %for.end12
++  %wide.trip.count27 = zext i32 %2 to i64
++  br label %for.body16
++
++for.body16:                                       ; preds = %for.body16.preheader, %for.inc26
++  %indvars.iv25 = phi i64 [ 1, %for.body16.preheader ], [ %indvars.iv.next26, %for.inc26 ]
++  %i4.08 = phi i32 [ %inc27, %for.inc26 ], [ 2, %for.body16.preheader ]
++  %cmp185 = icmp ugt i32 %i4.08, 2
++  br i1 %cmp185, label %for.body20.preheader, label %for.inc26
++
++for.body20.preheader:                             ; preds = %for.body16
++  br label %for.body20
++
++for.body20:                                       ; preds = %for.body20.preheader, %for.body20
++  %indvars.iv19 = phi i64 [ 1, %for.body20.preheader ], [ %indvars.iv.next20, %for.body20 ]
++  %arrayidx22 = getelementptr inbounds i32, i32* %A, i64 %indvars.iv19
++  store i32 22, i32* %arrayidx22, align 4
++  %indvars.iv.next20 = add nuw nsw i64 %indvars.iv19, 1
++  %exitcond24 = icmp ne i64 %indvars.iv.next20, %indvars.iv25
++  br i1 %exitcond24, label %for.body20, label %for.inc26.loopexit
++
++for.inc26.loopexit:                               ; preds = %for.body20
++  br label %for.inc26
++
++for.inc26:                                        ; preds = %for.inc26.loopexit, %for.body16
++  %inc27 = add nuw nsw i32 %i4.08, 1
++  %indvars.iv.next26 = add nuw nsw i64 %indvars.iv25, 1
++  %exitcond28 = icmp ne i64 %indvars.iv.next26, %wide.trip.count27
++  br i1 %exitcond28, label %for.body16, label %for.inc29.loopexit
++
++for.inc29.loopexit:                               ; preds = %for.inc26
++  br label %for.inc29
++
++for.inc29:                                        ; preds = %for.inc29.loopexit, %for.end12
++  %inc30 = add nuw nsw i32 %i1.010, 1
++  %exitcond29 = icmp ne i32 %inc30, %n1
++  br i1 %exitcond29, label %for.body, label %for.end31.loopexit
++
++for.end31.loopexit:                               ; preds = %for.inc29
++  br label %for.end31
++
++for.end31:                                        ; preds = %for.end31.loopexit, %entry
++  ret void
++}
+
